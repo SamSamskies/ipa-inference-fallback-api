@@ -1,9 +1,9 @@
 # IPA inference fallback API
 
 A fallback inference endpoint for apps using the Inference Provider API (IPA).
-When no Inference Provider API is detected, an app can use this endpoint for
-hosted inference. The app handles provider detection and decides when to use
-the fallback.
+When no browser extension providing the Inference Provider API is detected,
+an app can use this endpoint for hosted inference. The app handles provider
+detection and decides when to use the fallback.
 
 The endpoint runs as a standalone Node ESM `/api/inference` function.
 Ollama Cloud is the default; Gemini is selectable through server configuration.
