@@ -12,14 +12,10 @@ const originalFetch = globalThis.fetch;
 const originalLookupAll = imageFetchDns.lookupAll;
 const envNames = [
   "DEFAULT_INFERENCE_PROVIDER",
-  "INFERENCE_API_KEY",
   "GEMINI_API_KEY",
   "INFERENCE_FALLBACK_ENABLED",
-  "GEMINI_FALLBACK_ENABLED",
   "INFERENCE_CLIENT_DAILY_LIMIT",
-  "INFERENCE_MODEL",
   "GEMINI_MODEL",
-  "GEMINI_CLIENT_DAILY_LIMIT",
 ];
 let previousEnv;
 beforeEach(() => {
@@ -27,9 +23,9 @@ beforeEach(() => {
     envNames.map((key) => [key, process.env[key]]),
   );
   envNames.forEach((key) => delete process.env[key]);
-  process.env.INFERENCE_API_KEY = "test-key-not-a-credential";
+  process.env.GEMINI_API_KEY = "test-key-not-a-credential";
   process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
-  process.env.INFERENCE_MODEL = "test-model";
+  process.env.GEMINI_MODEL = "test-model";
   process.env.INFERENCE_FALLBACK_ENABLED = "true";
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "50";
   globalThis.fetch = () => {
@@ -115,7 +111,6 @@ function success(content = "Nostr is an open protocol.") {
 }
 
 test("missing hosted configuration reports unavailable without contacting a provider", async () => {
-  delete process.env.INFERENCE_API_KEY;
   delete process.env.GEMINI_API_KEY;
   const response = await call({ method: "GET" });
   assert.equal(response.statusCode, 503);
@@ -335,7 +330,7 @@ test("provider errors release the allowance so the user can retry", async () => 
 });
 
 test("hosted lightweight reasoning maps to Gemma's minimal setting", async () => {
-  process.env.INFERENCE_MODEL = "gemma-4-31b-it";
+  process.env.GEMINI_MODEL = "gemma-4-31b-it";
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
     assert.deepEqual(body.generationConfig.thinkingConfig, {

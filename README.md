@@ -65,16 +65,11 @@ selection returns `400 {"error":"invalid_provider"}`.
 | `OLLAMA_REQUESTS_PER_MINUTE` | 20 upstream attempts across clients, including search/continuation calls |
 | `OLLAMA_CLIENT_REQUESTS_PER_MINUTE` | 5 explanation attempts per client token |
 | `OLLAMA_MAX_CONCURRENT` | 2 active explanations |
-| `GEMINI_API_KEY` | Required for Gemini unless legacy `INFERENCE_API_KEY` is set |
+| `GEMINI_API_KEY` | Required for Gemini |
 | `GEMINI_MODEL` | `gemma-4-31b-it` |
 
-Provider-specific model variables take precedence over `INFERENCE_MODEL`. This
-generic model fallback applies only to the default provider, and only when
-`DEFAULT_INFERENCE_PROVIDER` is explicitly nonempty. Other providers use their
-own model setting or built-in default. Set `OLLAMA_MODEL` and `GEMINI_MODEL` to
-configure each provider's model. Legacy Gemini aliases `INFERENCE_API_KEY`,
-`GEMINI_FALLBACK_ENABLED`, and `GEMINI_CLIENT_DAILY_LIMIT` remain fallbacks for
-their corresponding settings. A generic setting takes precedence when present.
+Set `OLLAMA_MODEL` and `GEMINI_MODEL` to configure each provider's model. When
+unset, each provider uses its built-in default listed above.
 Numeric limits accept positive values, flooring them to integers; invalid values
 fall back to defaults.
 

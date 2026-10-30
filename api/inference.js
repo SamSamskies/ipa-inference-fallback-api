@@ -41,21 +41,16 @@ function defaultProviderId() {
 
 function apiKey(provider) {
   if (provider === "gemini") {
-    return process.env.GEMINI_API_KEY?.trim() || process.env.INFERENCE_API_KEY?.trim() || "";
+    return process.env.GEMINI_API_KEY?.trim() || "";
   }
   if (provider === "ollama") {
-    // INFERENCE_API_KEY is a legacy Gemini key; never send it to Ollama.
     return process.env.OLLAMA_API_KEY?.trim() || "";
   }
   return "";
 }
 
 function fallbackEnabled(provider) {
-  const flag = (
-    process.env.INFERENCE_FALLBACK_ENABLED ??
-    (provider === "gemini" ? process.env.GEMINI_FALLBACK_ENABLED : undefined) ??
-    ""
-  )
+  const flag = (process.env.INFERENCE_FALLBACK_ENABLED ?? "")
     .trim()
     .toLowerCase();
   if (flag === "0" || flag === "false" || flag === "off") return false;
@@ -64,16 +59,11 @@ function fallbackEnabled(provider) {
 
 function modelId(provider) {
   return process.env[provider === "ollama" ? "OLLAMA_MODEL" : "GEMINI_MODEL"]?.trim() ||
-    (provider === defaultProviderId() && process.env.DEFAULT_INFERENCE_PROVIDER?.trim()
-      ? process.env.INFERENCE_MODEL?.trim() : "") ||
     DEFAULT_MODELS[provider];
 }
 
-function clientDailyLimit(provider) {
-  return envInt(
-    "INFERENCE_CLIENT_DAILY_LIMIT",
-    provider === "gemini" ? envInt("GEMINI_CLIENT_DAILY_LIMIT", DEFAULT_CLIENT_DAILY) : DEFAULT_CLIENT_DAILY
-  );
+function clientDailyLimit() {
+  return envInt("INFERENCE_CLIENT_DAILY_LIMIT", DEFAULT_CLIENT_DAILY);
 }
 
 function tryConsumeClient(key, limit) {
@@ -239,7 +229,7 @@ function contentsHaveInlineData(contents) {
   );
 }
 
-// Legacy client hint: remove it when no images survive fetching. The service
+// Remove the client's vision hint when no images survive fetching. The service
 // never adds application prompts; the frontends own this instruction.
 const VISION_SYSTEM_LINE =
   "The first user message includes the note's images before the text. Look at those images when they matter.";
@@ -556,7 +546,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!tryConsumeClient(clientId, clientDailyLimit(provider))) {
+  if (!tryConsumeClient(clientId, clientDailyLimit())) {
     res.status(429).json({ error: "client_limit" });
     return;
   }
