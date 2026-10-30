@@ -441,6 +441,37 @@ test("Gemini reasoning maps across model families and auto omits thinking config
   }
 });
 
+test("Gemini capacity retry sleep respects the request abort signal", async () => {
+  const controller = new AbortController();
+  const originalTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = () => controller.signal;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) {
+      return Response.json(
+        { error: { status: "INTERNAL" } },
+        { status: 500 },
+      );
+    }
+    throw new Error("retry should not run after abort");
+  };
+  const abortTimer = setTimeout(() => {
+    controller.abort(new DOMException("Timed out", "TimeoutError"));
+  }, 50);
+  try {
+    const started = Date.now();
+    const response = await call();
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "provider_busy");
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - started < 400);
+  } finally {
+    clearTimeout(abortTimer);
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
 test("Gemini retries capacity once with the same payload and deadline", async () => {
   const calls = [];
   globalThis.fetch = async (_url, init) => {

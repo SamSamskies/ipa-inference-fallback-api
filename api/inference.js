@@ -11,6 +11,7 @@
 
 import dns from "node:dns/promises";
 import { isIP } from "node:net";
+import { scheduler } from "node:timers/promises";
 import { clientQuota } from "../lib/client-quota.js";
 import { envInt, loadLocalEnvFallback } from "../lib/env.js";
 import { completeOllama } from "../lib/ollama.js";
@@ -672,7 +673,7 @@ export default async function handler(req, res) {
         message: geminiErrorMessage(errJson)?.slice(0, 200),
       });
       try {
-        await new Promise((r) => setTimeout(r, 800));
+        await scheduler.wait(800, { signal: requestSignal });
         geminiRes = await postGemini(geminiBody);
       } catch {
         releaseClient(clientId);
