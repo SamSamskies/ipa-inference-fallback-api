@@ -64,7 +64,7 @@ function fallbackEnabled() {
 
 function modelId() {
   const provider = providerId();
-  return process.env[provider === "ollama" ? "OLLAMA_INFERENCE_MODEL" : "GEMINI_MODEL"]?.trim() ||
+  return process.env[provider === "ollama" ? "OLLAMA_MODEL" : "GEMINI_MODEL"]?.trim() ||
     (process.env.INFERENCE_PROVIDER?.trim() ? process.env.INFERENCE_MODEL?.trim() : "") ||
     DEFAULT_MODELS[provider];
 }

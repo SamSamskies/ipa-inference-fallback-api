@@ -58,7 +58,7 @@ provider returns `503 {"error":"invalid_provider"}`.
 | `INFERENCE_FALLBACK_ENABLED` | Enabled when the selected provider has a key; `0`, `false`, or `off` disables it |
 | `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per client token per UTC day |
 | `OLLAMA_API_KEY` | Required for Ollama; Gemini keys are never sent to Ollama |
-| `OLLAMA_INFERENCE_MODEL` | `gemma4:cloud`, mapped to `gemma4:31b` on the direct cloud API |
+| `OLLAMA_MODEL` | `gemma4:cloud`, mapped to `gemma4:31b` on the direct cloud API |
 | `OLLAMA_REQUESTS_PER_MINUTE` | 20 upstream attempts across clients, including search/continuation calls |
 | `OLLAMA_CLIENT_REQUESTS_PER_MINUTE` | 5 explanation attempts per client token |
 | `OLLAMA_MAX_CONCURRENT` | 2 active explanations |
@@ -67,8 +67,7 @@ provider returns `503 {"error":"invalid_provider"}`.
 
 Provider-specific model variables take precedence over `INFERENCE_MODEL`, which
 is considered only when `INFERENCE_PROVIDER` is explicitly nonempty. Set
-`OLLAMA_INFERENCE_MODEL` to configure the Ollama model; `OLLAMA_MODEL` is not
-read here. Legacy Gemini aliases `INFERENCE_API_KEY`,
+`OLLAMA_MODEL` to configure the Ollama model. Legacy Gemini aliases `INFERENCE_API_KEY`,
 `GEMINI_FALLBACK_ENABLED`, and `GEMINI_CLIENT_DAILY_LIMIT` remain fallbacks for
 their corresponding settings. A generic setting takes precedence when present.
 Numeric limits accept positive values, flooring them to integers; invalid values

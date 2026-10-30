@@ -15,7 +15,7 @@ const envNames = [
   "INFERENCE_PROVIDER", "INFERENCE_API_KEY", "INFERENCE_MODEL",
   "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
   "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_FALLBACK_ENABLED",
-  "OLLAMA_API_KEY", "OLLAMA_INFERENCE_MODEL", "OLLAMA_MODEL", "OLLAMA_REQUESTS_PER_MINUTE",
+  "OLLAMA_API_KEY", "OLLAMA_MODEL", "OLLAMA_REQUESTS_PER_MINUTE",
   "OLLAMA_CLIENT_REQUESTS_PER_MINUTE", "OLLAMA_MAX_CONCURRENT",
 ];
 let previous;
@@ -81,7 +81,6 @@ async function call({ method = "POST", token = crypto.randomUUID(), body = { mes
 }
 
 test("default backup talks directly to ollama.com with the cloud alias's API tag", async () => {
-  process.env.OLLAMA_MODEL = "tev1:0.8b";
   process.env.INFERENCE_API_KEY = "legacy-gemini-key";
   process.env.GEMINI_MODEL = "gemini-only";
   process.env.INFERENCE_MODEL = "old-gemini-model";
@@ -129,13 +128,13 @@ test("provider selection rejects typos and honors the disable flag", async () =>
 test("provider-specific model takes precedence and ordinary model tags pass through", async () => {
   process.env.INFERENCE_PROVIDER = "ollama";
   process.env.INFERENCE_MODEL = "generic-model";
-  process.env.OLLAMA_INFERENCE_MODEL = "custom:cloud";
+  process.env.OLLAMA_MODEL = "custom:cloud";
   globalThis.fetch = async (_url, options) => {
     assert.equal(JSON.parse(options.body).model, "custom:cloud");
     return success();
   };
   assert.equal((await call()).statusCode, 200);
-  delete process.env.OLLAMA_INFERENCE_MODEL;
+  delete process.env.OLLAMA_MODEL;
   globalThis.fetch = async (_url, options) => {
     assert.equal(JSON.parse(options.body).model, "generic-model");
     return success();
