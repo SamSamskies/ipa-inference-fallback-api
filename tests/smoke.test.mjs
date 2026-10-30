@@ -8,16 +8,26 @@ import { fileURLToPath } from "node:url";
 
 const script = fileURLToPath(new URL("../scripts/smoke.mjs", import.meta.url));
 
-function run(args, scenario = "success") {
+function readJsonLines(path) {
+  try { return readFileSync(path,"utf8").trim().split("\n").map(JSON.parse); }
+  catch (error) { if (error.code === "ENOENT") return []; throw error; }
+}
+
+function run(args, scenario = "success", requestTimeout = "") {
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
       import { appendFileSync } from "node:fs";
       import http from "node:http";
       import { syncBuiltinESMExports } from "node:module";
+      const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+      AbortSignal.timeout = (ms) => {
+        appendFileSync("timeouts.jsonl", JSON.stringify(ms) + "\\n");
+        return originalTimeout(ms);
+      };
       let localHandler;
       // Exercise the real local adapter/handler without opening a socket.
       http.createServer = (callback) => {
@@ -69,6 +79,7 @@ function run(args, scenario = "success") {
           body: init.body ? JSON.parse(init.body) : undefined };
         appendFileSync("requests.jsonl", JSON.stringify(request) + "\\n");
         const scenario = process.env.IPA_SMOKE_SCENARIO;
+        if (scenario === "timeout") throw new DOMException("Timed out", "TimeoutError");
         if (scenario === "unreachable") throw new TypeError("fetch failed");
         if (scenario === "missing_key") return Response.json({error:"missing_api_key"}, {status:503});
         if (scenario === "bad_json") return new Response("not JSON");
@@ -89,13 +100,8 @@ function run(args, scenario = "success") {
     assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
     const output = result.stdout + result.stderr;
     assert.doesNotMatch(output, /private-(?:gemini|ollama|replit)-test-key/);
-    let requests = [];
-    try {
-      requests = readFileSync(join(directory, "requests.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    return { ...result, output, requests };
+    return { ...result, output, requests: readJsonLines(join(directory,"requests.jsonl")),
+      timeouts: readJsonLines(join(directory,"timeouts.jsonl")) };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -183,4 +189,19 @@ test("smoke failures exit nonzero with useful endpoint errors", () => {
     assert.equal(result.status, 1, result.output);
     assert.match(result.output, expected);
   }
+});
+
+test("smoke timeout tracks the local request budget plus 30 seconds", () => {
+  for (const [configured,expected] of [["",120_000],["75000",75_000],["300000",170_000]]) {
+    const result = run(["--provider","replit"],"success",configured);
+    assert.equal(result.status,0,result.output);
+    assert.deepEqual(result.timeouts,[expected+30_000,expected]);
+  }
+});
+
+test("smoke timeout errors report the configured duration", () => {
+  const result = run(["--url","https://smoke.example/api/inference"],"timeout","1000");
+  assert.equal(result.status,1);
+  assert.match(result.output,/Request timed out after 31 seconds/);
+  assert.deepEqual(result.timeouts,[31_000]);
 });

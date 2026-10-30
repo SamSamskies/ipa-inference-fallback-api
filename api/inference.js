@@ -15,6 +15,7 @@ import { envInt, loadLocalEnvFallback, todayUtc } from "../lib/env.js";
 import { completeOllama } from "../lib/ollama.js";
 import { completeReplit } from "../lib/replit.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
+import { requestTimeoutMs } from "../lib/timeouts.js";
 import { ollamaLimiter } from "../lib/ollama-limits.js";
 import {
   applyCors,
@@ -29,7 +30,6 @@ import {
 
 const MAX_BODY_BYTES = 100_000;
 const MAX_PROMPT_CHARS = 60_000;
-const REQUEST_TIMEOUT_MS = 50_000;
 const DEFAULT_CLIENT_DAILY = 50;
 
 const clientBuckets = new Map();
@@ -547,7 +547,7 @@ export default async function handler(req, res) {
 
   if (provider === "ollama" || provider === "replit") {
     let finish;
-    const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const signal = AbortSignal.timeout(requestTimeoutMs());
     try {
       if (provider === "ollama") finish = ollamaLimiter.begin(clientId);
       const resolvedPrompt = {
@@ -620,7 +620,7 @@ export default async function handler(req, res) {
   }
 
   // Bound image fetching, generation, and the capacity retry within Vercel's limit.
-  const requestSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const requestSignal = AbortSignal.timeout(requestTimeoutMs());
 
   // Hosted path: pull image bytes ourselves first. Relying on Gemini fileUri
   // fetch for Nostr CDNs often returns 503 / fetch failures.

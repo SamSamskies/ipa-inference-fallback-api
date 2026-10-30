@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import handler from "../api/inference.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
+import { smokeTimeoutMs } from "../lib/timeouts.js";
 
 const HELP = `Usage: npm run smoke -- [--provider ${Object.keys(PROVIDER_CONFIG).join("|")}] [--model MODEL] [--url ENDPOINT]
 
@@ -102,7 +103,7 @@ async function main() {
     }
     if (values.provider !== undefined) url.searchParams.set("provider", provider);
 
-    const signal = AbortSignal.timeout(60_000);
+    const signal = AbortSignal.timeout(smokeTimeoutMs());
     const started = Date.now();
     const probe = await request(url, { method: "GET", signal }, provider, Boolean(server));
     if (probe?.ok !== true) throw new Error("GET returned an invalid configuration probe.");
@@ -139,7 +140,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  const message = error?.name === "TimeoutError" ? "Request timed out after 60 seconds."
+  const message = error?.name === "TimeoutError" ? `Request timed out after ${smokeTimeoutMs() / 1000} seconds.`
     : error?.message === "fetch failed" ? "Could not reach the endpoint. Check --url and whether its server is running."
       : error.message;
   console.error(`Smoke test failed: ${message}`);
