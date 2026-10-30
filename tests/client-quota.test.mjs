@@ -55,6 +55,16 @@ test("same-day consume still enforces the per-client limit", async () => {
   assert.equal(await quota.tryConsume("alice", 2), true);
 });
 
+test("concurrent first-time clients cannot grow the map past maxBuckets", async () => {
+  const quota = createClientQuota({ today: () => "2026-01-01", maxBuckets: 3 });
+  const results = await Promise.all(
+    ["a", "b", "c", "d", "e"].map((id) => quota.tryConsume(id, 50)),
+  );
+  assert.equal(results.filter((result) => result === true).length, 3);
+  assert.equal(results.filter((result) => result === "client_capacity").length, 2);
+  assert.equal(quota.buckets.size, 3);
+});
+
 test("concurrent consumes for one client cannot exceed the daily limit", async () => {
   const quota = createClientQuota({ today: () => "2026-01-01" });
   const results = await Promise.all(
