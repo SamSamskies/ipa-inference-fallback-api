@@ -3,11 +3,13 @@ import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import handler from "../api/inference.js";
 
-const HELP = `Usage: npm run smoke -- [--provider ollama|gemini] [--url ENDPOINT]
+const HELP = `Usage: npm run smoke -- [--provider ollama|gemini] [--model MODEL] [--url ENDPOINT]
 
 By default, start a temporary local server using keys from .env.local.
 Omit --provider to use DEFAULT_INFERENCE_PROVIDER (otherwise ollama).
+Use --model to override the selected provider's model for this local run only.
 Use --url to test an existing /api/inference endpoint with its own server keys.
+--model cannot be combined with --url; remote models are configured server-side.
 Runs a configuration probe and a short generation with web search disabled.
 `;
 
@@ -56,7 +58,8 @@ async function main() {
   let values;
   try {
     ({ values } = parseArgs({ options: {
-      provider: { type: "string" }, url: { type: "string" }, help: { type: "boolean", short: "h" },
+      provider: { type: "string" }, model: { type: "string" },
+      url: { type: "string" }, help: { type: "boolean", short: "h" },
     } }));
   } catch {
     throw new Error("Invalid arguments. Use npm run smoke -- --help for usage.");
@@ -71,6 +74,13 @@ async function main() {
   if ((values.provider !== undefined || values.url === undefined) &&
     provider !== "ollama" && provider !== "gemini") {
     throw new Error("Choose --provider ollama or --provider gemini.");
+  }
+  if (values.model !== undefined) {
+    if (!values.model.trim()) throw new Error("--model must be nonempty.");
+    if (values.url !== undefined) {
+      throw new Error("--model is only available for local smoke tests; --url uses the server's configured model.");
+    }
+    process.env[provider === "ollama" ? "OLLAMA_MODEL" : "GEMINI_MODEL"] = values.model.trim();
   }
 
   let server;

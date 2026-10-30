@@ -68,6 +68,15 @@ handler, probes configuration, and sends a short generation request to the chose
 provider. No Vercel login or running development server is needed. Without
 `--provider`, it uses `DEFAULT_INFERENCE_PROVIDER` (Ollama when unset).
 Keys and model settings load from `.env.local` using the same rules as the API.
+Override the selected provider's model for a single run with `--model`:
+
+```sh
+npm run smoke -- --provider ollama --model gemma4:cloud
+npm run smoke -- --provider gemini --model gemma-4-31b-it
+```
+
+The override applies only to the smoke-test process and leaves `.env.local`
+unchanged. Omit `--provider` to override the default provider's model.
 Web search is off and reasoning effort is `none`. This makes a real provider API
 call and may consume quota or incur a small charge.
 
@@ -84,8 +93,8 @@ npm run smoke -- --provider ollama --url https://your-service.vercel.app/api/inf
 ```
 
 With `--url`, the target server supplies its own provider keys and model settings.
-Omit `--provider` to test that server's default. Use `npm run smoke -- --help` for
-usage.
+`--model` cannot be combined with `--url`. Omit `--provider` to test that server's
+default. Use `npm run smoke -- --help` for usage.
 
 ## Configuration
 

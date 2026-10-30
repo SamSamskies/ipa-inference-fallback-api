@@ -11,12 +11,51 @@ const script = fileURLToPath(new URL("../scripts/smoke.mjs", import.meta.url));
 function run(args, scenario = "success") {
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    writeFileSync(join(directory, ".env.local"),
-      `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\n`);
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\n`;
+    writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
       import { appendFileSync } from "node:fs";
+      import http from "node:http";
+      import { syncBuiltinESMExports } from "node:module";
+      let localHandler;
+      // Exercise the real local adapter/handler without opening a socket.
+      http.createServer = (callback) => {
+        localHandler = callback;
+        return {
+          once() {}, listen(_port, _host, ready) { ready(); },
+          address() { return {port: 31415}; },
+          close(done) { done(); }, closeAllConnections() {},
+        };
+      };
+      syncBuiltinESMExports();
       globalThis.fetch = async (url, init) => {
+        const target = new URL(url);
+        if (target.hostname === "127.0.0.1") {
+          return new Promise((resolve, reject) => {
+            const headers = Object.fromEntries(new Headers(init.headers));
+            const req = { method: init.method, url: target.pathname + target.search,
+              headers: { ...headers, host: target.host },
+              async *[Symbol.asyncIterator]() { if (init.body) yield Buffer.from(init.body); },
+            };
+            const responseHeaders = new Headers();
+            const res = { statusCode: 200,
+              setHeader(name, value) { responseHeaders.set(name, value); },
+              end(body) { resolve(new Response(body, {status: this.statusCode, headers: responseHeaders})); },
+            };
+            Promise.resolve(localHandler(req, res)).catch(reject);
+          });
+        }
+        if (url === "https://ollama.com/api/chat") {
+          const model = JSON.parse(init.body).model;
+          appendFileSync("requests.jsonl", JSON.stringify({provider:"ollama", model}) + "\\n");
+          return Response.json({message:{role:"assistant",content:"smoke test OK"}});
+        }
+        if (target.hostname === "generativelanguage.googleapis.com") {
+          const model = decodeURIComponent(target.pathname.split("/models/")[1].split(":generateContent")[0]);
+          appendFileSync("requests.jsonl", JSON.stringify({provider:"gemini", model}) + "\\n");
+          return Response.json({candidates:[{content:{parts:[{text:"smoke test OK"}]}}]});
+        }
         const request = { url: String(url), method: init.method, headers: init.headers,
           body: init.body ? JSON.parse(init.body) : undefined };
         appendFileSync("requests.jsonl", JSON.stringify(request) + "\\n");
@@ -38,6 +77,7 @@ function run(args, scenario = "success") {
       cwd: directory, env: { ...env, IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
     });
     assert.ifError(result.error);
+    assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
     const output = result.stdout + result.stderr;
     assert.doesNotMatch(output, /private-(?:gemini|ollama)-test-key/);
     let requests = [];
@@ -56,12 +96,36 @@ test("smoke help and invalid arguments exit without a request", () => {
   const help = run(["--help"]);
   assert.equal(help.status, 0);
   assert.match(help.output, /--provider ollama\|gemini/);
+  assert.match(help.output, /--model MODEL/);
   assert.equal(help.requests.length, 0);
   for (const args of [["--provider", "unknown"], ["--provider", ""], ["--unknown"],
+    ["--model", ""], ["--model", "  "],
+    ["--model", "custom-model", "--url", "https://smoke.example/api/inference"],
     ["--url", "invalid"], ["--url", "file:///etc/passwd"], ["--url", "https://user:password@example.test"]]) {
     const result = run(args);
     assert.equal(result.status, 1);
     assert.equal(result.requests.length, 0);
+  }
+});
+
+test("smoke model overrides reach the selected provider without changing the env file", () => {
+  for (const [args, provider, model] of [
+    [["--provider", "ollama", "--model", "  custom:cloud  "], "ollama", "custom:cloud"],
+    [["--provider", "gemini", "--model", "custom-gemini-model"], "gemini", "custom-gemini-model"],
+    [["--model", "default-provider-model"], "gemini", "default-provider-model"],
+  ]) {
+    const result = run(args);
+    assert.equal(result.status, 0, result.output);
+    assert.deepEqual(result.requests, [{provider, model}]);
+    assert.ok(result.output.includes(`Model: ${model}`));
+  }
+});
+
+test("local smoke without a model override uses the provider's configured model", () => {
+  for (const provider of ["ollama", "gemini"]) {
+    const result = run(["--provider", provider]);
+    assert.equal(result.status, 0, result.output);
+    assert.deepEqual(result.requests, [{provider, model:`configured-${provider}-model`}]);
   }
 });
 
