@@ -399,6 +399,15 @@ async function resolveImagesToInline(contents, signal) {
   return next;
 }
 
+const RETRYABLE_GEMINI_STATUS = new Set([
+  "INTERNAL",
+  "UNAVAILABLE",
+  "RESOURCE_EXHAUSTED",
+  "DEADLINE_EXCEEDED",
+  "ABORTED",
+  "UNKNOWN",
+]);
+
 function looksLikeCapacityError(errJson, httpStatus) {
   if (httpStatus !== 500 && httpStatus !== 503 && httpStatus !== 502) {
     return false;
@@ -414,6 +423,28 @@ function looksLikeCapacityError(errJson, httpStatus) {
   return /high demand|try again later|temporarily|UNAVAILABLE|overloaded|capacity|internal error/i.test(
     text
   );
+}
+
+function isHardGeminiProviderStatus(status) {
+  return typeof status === "string" && status.length > 0 && !RETRYABLE_GEMINI_STATUS.has(status);
+}
+
+function sendGeminiProviderFailure(res, httpStatus, errJson) {
+  const providerStatus =
+    errJson && typeof errJson === "object" ? errJson.error?.status : undefined;
+  if (httpStatus >= 500 && !isHardGeminiProviderStatus(providerStatus)) {
+    res.status(503).json({
+      error: "provider_busy",
+      http: httpStatus,
+      ...(providerStatus ? { providerStatus } : {}),
+    });
+    return;
+  }
+  res.status(400).json({
+    error: "provider_error",
+    http: httpStatus,
+    ...(providerStatus ? { providerStatus } : {}),
+  });
 }
 
 function readBody(req) {
@@ -689,11 +720,7 @@ export default async function handler(req, res) {
         status: providerStatus,
         message: geminiErrorMessage(errJson)?.slice(0, 200),
       });
-      res.status(503).json({
-        error: "provider_busy",
-        http: geminiRes.status,
-        ...(providerStatus ? { providerStatus } : {}),
-      });
+      sendGeminiProviderFailure(res, geminiRes.status, errJson);
       return;
     }
   }
@@ -750,19 +777,7 @@ export default async function handler(req, res) {
       status: providerStatus,
       message: geminiErrorMessage(errJson)?.slice(0, 200),
     });
-    if (geminiRes.status >= 500) {
-      res.status(503).json({
-        error: "provider_busy",
-        http: geminiRes.status,
-        ...(providerStatus ? { providerStatus } : {}),
-      });
-      return;
-    }
-    res.status(400).json({
-      error: "provider_error",
-      http: geminiRes.status,
-      ...(providerStatus ? { providerStatus } : {}),
-    });
+    sendGeminiProviderFailure(res, geminiRes.status, errJson);
     return;
   }
 

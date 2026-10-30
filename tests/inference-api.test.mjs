@@ -524,6 +524,22 @@ test("Gemini quota classification distinguishes search, daily and minute limits"
   assert.equal((await call({ token })).statusCode, 200);
 });
 
+test("non-capacity Gemini 5xx with a hard provider status is not busy", async () => {
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
+  const token = crypto.randomUUID();
+  for (const status of ["INVALID_ARGUMENT", "FAILED_PRECONDITION", "PERMISSION_DENIED"]) {
+    globalThis.fetch = async () =>
+      Response.json({ error: { status } }, { status: 500 });
+    const result = await call({ token });
+    assert.equal(result.statusCode, 400);
+    assert.equal(result.body.error, "provider_error");
+    assert.equal(result.body.providerStatus, status);
+    assert.equal(result.body.http, 500);
+  }
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ token })).statusCode, 200);
+});
+
 test("malformed Gemini replies and provider failures release the daily allowance", async () => {
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
   const token = crypto.randomUUID();
