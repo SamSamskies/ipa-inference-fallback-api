@@ -565,7 +565,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const consume = tryConsumeClient(clientId, clientDailyLimit());
+  const consume = await tryConsumeClient(clientId, clientDailyLimit());
   if (consume !== true) {
     res.status(429).json({ error: consume });
     return;
