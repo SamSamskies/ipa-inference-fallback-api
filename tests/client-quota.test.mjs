@@ -18,9 +18,32 @@ test("client buckets stay bounded when distinct ids keep arriving", () => {
   const quota = createClientQuota({ today: () => "2026-01-01", maxBuckets: 2 });
   assert.equal(quota.tryConsume("a", 50), true);
   assert.equal(quota.tryConsume("b", 50), true);
-  assert.equal(quota.tryConsume("c", 50), true);
+  assert.equal(quota.tryConsume("c", 50), false);
   assert.equal(quota.buckets.size, 2);
-  assert.equal(quota.buckets.has("c"), true);
+  assert.equal(quota.buckets.has("a"), true);
+  assert.equal(quota.buckets.has("b"), true);
+  assert.equal(quota.buckets.has("c"), false);
+});
+
+test("capacity eviction does not reset an existing client's daily count", () => {
+  const quota = createClientQuota({ today: () => "2026-01-01", maxBuckets: 2 });
+  assert.equal(quota.tryConsume("alice", 2), true);
+  assert.equal(quota.tryConsume("bob", 2), true);
+  assert.equal(quota.tryConsume("carol", 2), false);
+  assert.equal(quota.tryConsume("alice", 2), true);
+  assert.equal(quota.tryConsume("alice", 2), false);
+  assert.deepEqual(quota.buckets.get("alice"), { day: "2026-01-01", count: 2 });
+});
+
+test("released buckets can be reused without dropping in-use counts", () => {
+  const quota = createClientQuota({ today: () => "2026-01-01", maxBuckets: 2 });
+  assert.equal(quota.tryConsume("alice", 2), true);
+  assert.equal(quota.tryConsume("bob", 2), true);
+  quota.release("alice");
+  assert.equal(quota.tryConsume("carol", 2), true);
+  assert.equal(quota.buckets.has("alice"), false);
+  assert.deepEqual(quota.buckets.get("bob"), { day: "2026-01-01", count: 1 });
+  assert.deepEqual(quota.buckets.get("carol"), { day: "2026-01-01", count: 1 });
 });
 
 test("same-day consume still enforces the per-client limit", () => {
