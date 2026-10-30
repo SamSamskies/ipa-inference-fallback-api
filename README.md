@@ -169,7 +169,8 @@ and `{ "type": "image", "url": "https://..." }` or
 `{ "type": "image", "mediaType": "image/png", "data": "base64..." }` parts.
 Supported image types are JPEG, PNG, WebP, and GIF. Request body and prompt caps
 remain 100,000 and 60,000 respectively using the existing length checks; fetched
-images are capped at 4,000,000 bytes each. Image fetches reject private/local
+images are capped at 4,000,000 bytes each, and the total inline image payload
+after fetch cannot exceed 4,000,000 bytes (`413 payload_too_large`). Image fetches reject private/local
 destinations and credentials, validate all DNS answers and redirect hops, and pin
 the connection IP while retaining the original Host/TLS SNI. At most five
 redirects are followed. Failed image downloads become text URLs.

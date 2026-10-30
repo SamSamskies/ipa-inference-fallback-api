@@ -197,6 +197,19 @@ function promptChars(system, contents) {
   return total;
 }
 
+function inlineImageBytes(contents) {
+  let total = 0;
+  for (const content of contents) {
+    for (const part of content.parts) {
+      const data = part.inlineData?.data;
+      if (typeof data !== "string" || !data) continue;
+      const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+      total += Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+    }
+  }
+  return total;
+}
+
 const MAX_INLINE_IMAGE_BYTES = 4_000_000;
 const MAX_IMAGE_FETCH_REDIRECTS = 5;
 
@@ -582,6 +595,11 @@ export default async function handler(req, res) {
           ? await resolveImagesToInline(prompt.contents, signal)
           : prompt.contents,
       };
+      if (inlineImageBytes(resolvedPrompt.contents) > MAX_INLINE_IMAGE_BYTES) {
+        await releaseClient(clientId);
+        res.status(413).json({ error: "payload_too_large" });
+        return;
+      }
       if (provider === "replit") {
         resolvedPrompt.contents = fallbackUnreadImages(resolvedPrompt.contents);
         if (!contentsHaveInlineData(resolvedPrompt.contents)) {
@@ -663,6 +681,11 @@ export default async function handler(req, res) {
     }
   }
   geminiBody.contents = fallbackUnreadImages(geminiBody.contents);
+  if (inlineImageBytes(geminiBody.contents) > MAX_INLINE_IMAGE_BYTES) {
+    await releaseClient(clientId);
+    res.status(413).json({ error: "payload_too_large" });
+    return;
+  }
   if (
     geminiBody.systemInstruction &&
     !contentsHaveInlineData(geminiBody.contents)

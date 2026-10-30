@@ -692,6 +692,31 @@ test("image redirects cannot pivot to private networks and discard the response 
   assert.equal(destroyed, true);
 });
 
+test("fetched images that exceed the total inline budget return payload_too_large", async () => {
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
+  const token = crypto.randomUUID();
+  mockPinnedHttpsImage(new Uint8Array(2_000_001));
+  globalThis.fetch = async () => success();
+  const response = await call({
+    token,
+    body: {
+      webSearch: false,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", url: "https://images.example.test/a.png" },
+          { type: "image", url: "https://images.example.test/b.png" },
+          { type: "text", text: "Describe these" },
+        ],
+      }],
+    },
+  });
+  assert.equal(response.statusCode, 413);
+  assert.equal(response.body.error, "payload_too_large");
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ token })).statusCode, 200);
+});
+
 test("empty and oversized fetched images fall back to text", async () => {
   for (const length of [0, 4_000_001]) {
     mockPinnedHttpsImage(new Uint8Array(length));
