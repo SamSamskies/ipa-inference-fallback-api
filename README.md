@@ -9,9 +9,6 @@ The endpoint runs as a standalone Node ESM `/api/inference` function.
 Ollama Cloud is the default; Gemini is selectable through server configuration.
 There are no runtime package dependencies or frontend/build framework dependencies.
 
-This is the behavior-preserving extraction in [issue #2](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/2).
-Provider adapters, app registry/authentication, distributed limits, deployment,
-and frontend migrations are subsequent work in [the parent plan](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/1).
 The existing origin checks and client token are not app authentication. Existing
 limits are in memory, per process, and do not provide a shared production quota.
 
