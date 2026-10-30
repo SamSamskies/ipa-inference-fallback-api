@@ -205,7 +205,7 @@ their existing JSON shape and codes:
 | 502 | `provider_error`, Ollama/Replit `model_unavailable`, Ollama/Replit `provider_auth` |
 | 503 | `missing_api_key`, `disabled`, `invalid_provider` (configured default), `provider_busy` |
 
-Ollama rate limits/cooldowns and Replit gateway rate limits retain `Retry-After`;
+Ollama rate limits/cooldowns, Replit gateway rate limits, and Gemini 429s retain `Retry-After`;
 Replit maps insufficient-credit responses to `quota_exhausted`. Gemini quota classification
 distinguishes search, daily, and short-window limits. Provider failures release
 the daily success allowance, while Ollama attempt limits still count failures.

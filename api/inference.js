@@ -743,8 +743,9 @@ export default async function handler(req, res) {
   if (geminiRes.status === 429) {
     await releaseClient(clientId);
     let quota = "rate";
+    let errJson = null;
     try {
-      const errJson = await geminiRes.json();
+      errJson = await geminiRes.json();
       quota = classifyGemini429(errJson);
       console.warn("[api/inference] provider 429", {
         kind: quota,
@@ -766,6 +767,7 @@ export default async function handler(req, res) {
       : quota === "daily"
         ? "quota_exhausted"
         : "rate_limited";
+    res.setHeader("Retry-After", String(geminiRetryAfter(geminiRes, errJson)));
     res.status(429).json({ error });
     return;
   }
@@ -863,6 +865,31 @@ function thinkingConfigForEffort(model, effort) {
     return { thinkingLevel: effort === "none" ? "minimal" : "high" };
   }
   return { thinkingLevel: effort === "none" ? "minimal" : effort };
+}
+
+function retryAfterSeconds(value) {
+  if (value == null) return 60;
+  const raw = String(value).trim();
+  if (!raw) return 60;
+  const protoDelay = /^(\d+(?:\.\d+)?)s$/i.exec(raw);
+  if (protoDelay) return Math.max(1, Math.ceil(Number(protoDelay[1])));
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1, Math.ceil(seconds));
+  const date = Date.parse(raw);
+  return Number.isFinite(date) ? Math.max(1, Math.ceil((date - Date.now()) / 1000)) : 60;
+}
+
+function geminiRetryAfter(response, errJson) {
+  const header = typeof response.headers?.get === "function"
+    ? response.headers.get("retry-after")
+    : undefined;
+  if (header?.trim()) return retryAfterSeconds(header);
+  let delay;
+  walkObjects(errJson, (record) => {
+    if (delay || typeof record.retryDelay !== "string") return;
+    if (record.retryDelay.trim()) delay = record.retryDelay;
+  });
+  return retryAfterSeconds(delay);
 }
 
 function classifyGemini429(body) {

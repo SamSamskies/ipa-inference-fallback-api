@@ -557,6 +557,23 @@ test("persistent Gemini capacity failures stop after one retry and release daily
   assert.equal((await call({ token })).statusCode, 200);
 });
 
+test("Gemini 429 forwards Retry-After from the header, retryDelay, or a default", async () => {
+  const now = Date.now();
+  mock.method(Date, "now", () => now);
+  for (const [factory, expected] of [
+    [() => new Response("limited", { status: 429, headers: { "Retry-After": "30" } }), "30"],
+    [() => new Response("limited", { status: 429, headers: { "Retry-After": new Date(now + 60_000).toUTCString() } }), "60"],
+    [() => new Response("limited", { status: 429, headers: { "Retry-After": "garbage" } }), "60"],
+    [() => Response.json({ error: { details: [{ retryDelay: "15s" }] } }, { status: 429 }), "15"],
+    [() => new Response("not json", { status: 429 }), "60"],
+  ]) {
+    globalThis.fetch = async () => factory();
+    const response = await call();
+    assert.equal(response.statusCode, 429);
+    assert.equal(response.headers["Retry-After"], expected);
+  }
+});
+
 test("Gemini quota classification distinguishes search, daily and minute limits", async () => {
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
   const token = crypto.randomUUID();
