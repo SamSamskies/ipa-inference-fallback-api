@@ -57,6 +57,10 @@ function run(args, scenario = "success") {
           return Response.json({candidates:[{content:{parts:[{text:"smoke test OK"}]}}]});
         }
         if (target.hostname === "samsamskies-inference.replit.app") {
+          // The gateway serves its HTML SPA at the incorrect /v1 path.
+          if (target.pathname !== "/api/v1/chat/completions") {
+            return new Response("<!DOCTYPE html><html>Inference Gateway</html>", {headers:{"Content-Type":"text/html"}});
+          }
           const model = JSON.parse(init.body).model;
           appendFileSync("requests.jsonl", JSON.stringify({provider:"replit", model}) + "\\n");
           return Response.json({choices:[{message:{role:"assistant",content:"smoke test OK"}}]});

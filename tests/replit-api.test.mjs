@@ -5,7 +5,7 @@ import test, { afterEach, beforeEach, mock } from "node:test";
 import handler, { imageFetchDns } from "../api/inference.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 
-const URL = "https://samsamskies-inference.replit.app/v1/chat/completions";
+const URL = "https://samsamskies-inference.replit.app/api/v1/chat/completions";
 const MODEL = "google/gemma-4-26b-a4b-it";
 const VISION_HINT = "The first user message includes the note's images before the text. Look at those images when they matter.";
 const messages = [{ role: "system", content: "Respond in Spanish unless the user requests another language." },
@@ -167,7 +167,9 @@ test("Replit Retry-After accepts HTTP dates and defaults unreadable values", asy
 });
 
 test("malformed Replit replies and unexpected tool calls fail without exposing reasoning", async () => {
-  for (const response of [new Response("not JSON"),Response.json(null),Response.json({error:{message:"bad"}}),
+  for (const response of [new Response("not JSON"),
+    new Response("<!DOCTYPE html><html><title>Inference Gateway</title></html>",{headers:{"Content-Type":"text/html"}}),
+    Response.json(null),Response.json({error:{message:"bad"}}),
     Response.json({choices:[]}),success(null),success(""),success("partial",{choices:[{finish_reason:"error",message:{role:"assistant",content:"partial"}}]}),
     success("partial",{choices:[{message:{role:"assistant",content:"partial",tool_calls:[{function:{name:"web_fetch"}}]}}]}),
   ]) {

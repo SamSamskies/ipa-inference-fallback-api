@@ -167,7 +167,7 @@ redirects are followed. Failed image downloads become text URLs.
 three chat calls. Gemini uses Google Search grounding and retries capacity errors
 once. Replit calls the fixed
 [`samsamskies-inference.replit.app` gateway](https://samsamskies-inference.replit.app)
-at `/v1/chat/completions` using `REPLIT_API_KEY`. With search enabled, it sends
+at `/api/v1/chat/completions` using `REPLIT_API_KEY`. With search enabled, it sends
 `tools: [{"type":"openrouter:web_search"}]` and leaves execution to the gateway,
 following [OpenRouter's hosted search format](https://openrouter.ai/docs/guides/features/server-tools/web-search).
 Returned `url_citation` annotations become source links. Replit uses OpenAI-compatible
