@@ -115,9 +115,14 @@ default. Use `npm run smoke -- --help` for usage.
 | `GEMINI_MODEL` | `gemma-4-31b-it` |
 | `REPLIT_API_KEY` | The Replit gateway's bearer token; required for Replit |
 | `REPLIT_MODEL` | `google/gemma-4-26b-a4b-it` |
+| `REPLIT_MAX_TOKENS` | Optional total completion-token cap, including reasoning; unset uses gateway/model defaults |
 
 Set `OLLAMA_MODEL`, `GEMINI_MODEL`, and `REPLIT_MODEL` to configure each provider's model. When
 unset, each provider uses its built-in default listed above.
+Replit leaves the output budget to the gateway unless `REPLIT_MAX_TOKENS` is set.
+Reasoning models need room for both reasoning and the final answer; a small total
+cap can exhaust the budget before visible answer text is produced. All calls
+remain subject to the shared 50-second deadline.
 Numeric limits accept positive values, flooring them to integers; invalid values
 fall back to defaults.
 

@@ -11,7 +11,7 @@ const VISION_HINT = "The first user message includes the note's images before th
 const messages = [{ role: "system", content: "Respond in Spanish unless the user requests another language." },
   { role: "user", content: "Hello" }, { role: "assistant", content: "Hola" },
   { role: "user", content: "Reply in French." }];
-const envNames = ["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
+const envNames = ["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "REPLIT_MAX_TOKENS",
   ...Object.values(PROVIDER_CONFIG).flatMap(({keyEnv, modelEnv}) => [keyEnv, modelEnv])];
 const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
@@ -66,7 +66,7 @@ test("Replit sends native chat, reasoning and temperature to the fixed gateway",
     assert.equal(init.headers.Authorization,"Bearer test-replit-key");
     assert.equal(init.redirect,"error");
     assert.ok(init.signal instanceof AbortSignal);
-    assert.deepEqual(JSON.parse(init.body),{model:MODEL,messages,stream:false,max_tokens:2048,
+    assert.deepEqual(JSON.parse(init.body),{model:MODEL,messages,stream:false,
       reasoning_effort:"none",temperature:0});
     return success();
   };
@@ -85,6 +85,18 @@ test("configured and returned Replit models take precedence over client model fi
   const response=await call({body:{messages,webSearch:false,model:"client/model",baseUrl:"https://untrusted.test",apiKey:"client-key"}});
   assert.equal(response.statusCode,200);
   assert.equal(response.body.model,"actual/model");
+});
+
+test("Replit leaves the completion budget to the gateway unless configured server-side", async () => {
+  for (const [configured, expected] of [[undefined,undefined],["4096",4096],["8192",8192],["0.5",undefined],["invalid",undefined]]) {
+    if (configured === undefined) delete process.env.REPLIT_MAX_TOKENS;
+    else process.env.REPLIT_MAX_TOKENS = configured;
+    globalThis.fetch = async (_url,init) => {
+      assert.equal(JSON.parse(init.body).max_tokens,expected);
+      return success();
+    };
+    assert.equal((await call({body:{messages,webSearch:false,max_tokens:1,options:{reasoningEffort:"high"}}})).statusCode,200);
+  }
 });
 
 test("Replit hosted web search is gateway-managed and citations become source links", async () => {
