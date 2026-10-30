@@ -1,0 +1,571 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import https from "node:https";
+import test, { afterEach, beforeEach, mock } from "node:test";
+import handler, { imageFetchDns } from "../api/inference.js";
+
+// Client-supplied fixtures; application prompt builders stay in the frontends.
+const SYSTEM_PROMPT_IMAGES_LINE =
+  "The first user message includes the note's images before the text. Look at those images when they matter.";
+
+const originalFetch = globalThis.fetch;
+const originalLookup = imageFetchDns.lookupAll;
+const originalNow = Date.now;
+const envNames = [
+  "DEFAULT_INFERENCE_PROVIDER",
+  "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
+  "GEMINI_API_KEY", "GEMINI_MODEL",
+  "OLLAMA_API_KEY", "OLLAMA_MODEL", "OLLAMA_REQUESTS_PER_MINUTE",
+  "OLLAMA_CLIENT_REQUESTS_PER_MINUTE", "OLLAMA_MAX_CONCURRENT",
+];
+let previous;
+let time = originalNow();
+beforeEach(() => {
+  previous = envNames.map((name) => process.env[name]);
+  envNames.forEach((name) => delete process.env[name]);
+  process.env.OLLAMA_API_KEY = "test-ollama-key";
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "50";
+  time += 120_000;
+  Date.now = () => time;
+  imageFetchDns.lookupAll = async () => [{ address: "203.0.113.10", family: 4 }];
+  globalThis.fetch = () => { throw new Error("Unexpected fetch"); };
+});
+afterEach(() => {
+  mock.restoreAll();
+  Date.now = originalNow;
+  globalThis.fetch = originalFetch;
+  imageFetchDns.lookupAll = originalLookup;
+  envNames.forEach((name, i) => {
+    if (previous[i] === undefined) delete process.env[name];
+    else process.env[name] = previous[i];
+  });
+});
+
+function mockPinnedHttpsImage(bytes, contentType = "image/png") {
+  const calls = [];
+  mock.method(https, "request", (options, onResponse) => {
+    calls.push(options);
+    const req = new EventEmitter();
+    req.end = () =>
+      queueMicrotask(() => {
+        const incoming = new EventEmitter();
+        incoming.statusCode = 200;
+        incoming.headers = { "content-type": contentType };
+        incoming.destroy = () => {};
+        onResponse(incoming);
+        incoming.emit("data", Buffer.from(bytes));
+        incoming.emit("end");
+      });
+    return req;
+  });
+  return calls;
+}
+
+const messages = [
+  { role: "system", content: "Explain the note" },
+  { role: "user", content: "What is Nostr?" },
+];
+function success(content = "An open protocol.") {
+  return Response.json({ message: { role: "assistant", content }, done: true });
+}
+async function call({ method = "POST", token = crypto.randomUUID(), body = { messages, webSearch: false }, url = "/api/inference" } = {}) {
+  const res = {
+    statusCode: 200, headers: {}, body: null,
+    setHeader(name, value) { this.headers[name] = value; },
+    status(code) { this.statusCode = code; return this; },
+    json(value) { this.body = value; return this; },
+    end() { return this; },
+  };
+  await handler({ method, url, headers: { host: "example.test", origin: "https://example.test", "x-inference-client": token }, body }, res);
+  return res;
+}
+
+test("default backup talks directly to ollama.com with the cloud alias's API tag", async () => {
+  process.env.GEMINI_MODEL = "gemini-only";
+  assert.equal((await call({ method: "GET" })).statusCode, 200);
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, "https://ollama.com/api/chat");
+    assert.equal(options.headers.Authorization, "Bearer test-ollama-key");
+    assert.equal(options.redirect, "error");
+    const body = JSON.parse(options.body);
+    assert.equal(body.model, "gemma4:31b");
+    assert.equal(body.stream, false);
+    assert.equal(body.think, false);
+    assert.deepEqual(body.options, { num_predict: 2048, temperature: 0.3 });
+    assert.deepEqual(body.messages, messages);
+    assert.equal(body.tools, undefined);
+    return success();
+  };
+  const response = await call({ body: { messages, webSearch: false, options: { reasoningEffort: "none", temperature: 0.3 } } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.model, "gemma4:31b");
+  assert.equal(response.body.content, "An open protocol.");
+});
+
+test("Ollama never reuses Gemini credentials, even with an explicit selector", async () => {
+  delete process.env.OLLAMA_API_KEY;
+  process.env.GEMINI_API_KEY = "gemini-key";
+  for (const provider of [undefined, "ollama"]) {
+    if (provider) process.env.DEFAULT_INFERENCE_PROVIDER = provider;
+    const response = await call({ method: "GET" });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "missing_api_key");
+  }
+});
+
+test("provider selection rejects typos and honors the disable flag", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "olllama";
+  assert.equal((await call()).body.error, "invalid_provider");
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  process.env.INFERENCE_FALLBACK_ENABLED = "false";
+  assert.equal((await call()).body.error, "disabled");
+});
+
+test("configured Ollama model tags pass through and missing settings use the default", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  process.env.OLLAMA_MODEL = "custom:cloud";
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(JSON.parse(options.body).model, "custom:cloud");
+    return success();
+  };
+  assert.equal((await call()).statusCode, 200);
+  delete process.env.OLLAMA_MODEL;
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(JSON.parse(options.body).model, "gemma4:31b");
+    return success();
+  };
+  assert.equal((await call()).statusCode, 200);
+});
+
+test("requests use the configured default and can explicitly select either provider", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_MODEL = "gemini-test-model";
+  const paths = [];
+  globalThis.fetch = async (url, init) => {
+    paths.push(String(url));
+    if (String(url).startsWith("https://generativelanguage.googleapis.com/")) {
+      assert.match(url, /models\/gemini-test-model:generateContent\?key=test-gemini-key$/);
+      return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+    }
+    assert.equal(url, "https://ollama.com/api/chat");
+    assert.equal(init.headers.Authorization, "Bearer test-ollama-key");
+    return success("Ollama answer");
+  };
+  assert.deepEqual((await call()).body, { content: "Gemini answer", model: "gemini-test-model" });
+  assert.deepEqual((await call({ url: "/api/inference?provider=ollama" })).body,
+    { content: "Ollama answer", model: "gemma4:31b" });
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  assert.deepEqual((await call({ url: "/api/inference?provider=gemini" })).body,
+    { content: "Gemini answer", model: "gemini-test-model" });
+  assert.equal(paths.length, 3);
+});
+
+test("provider-specific probes and POSTs require that provider's credentials", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  for (const method of ["GET", "POST"]) {
+    const response = await call({ method, url: "/api/inference?provider=gemini" });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "missing_api_key");
+  }
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  assert.deepEqual((await call({ method: "GET", url: "/api/inference?provider=gemini" })).body, { ok: true });
+  delete process.env.OLLAMA_API_KEY;
+  for (const method of ["GET", "POST"]) {
+    const response = await call({ method, url: "/api/inference?provider=ollama" });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "missing_api_key");
+  }
+});
+
+test("unknown, empty and repeated provider parameters fail without contacting providers", async () => {
+  for (const query of ["provider=unknown", "provider=", "provider=%20", "provider=__proto__",
+    "provider=ollama&provider=gemini", "provider=ollama&provider=ollama"]) {
+    for (const method of ["GET", "POST"]) {
+      const response = await call({ method, url: `/api/inference?${query}` });
+      assert.equal(response.statusCode, 400);
+      assert.deepEqual(response.body, { error: "invalid_provider" });
+    }
+  }
+  process.env.DEFAULT_INFERENCE_PROVIDER = "typo";
+  assert.equal((await call({ method: "GET" })).statusCode, 503);
+  // An explicit valid choice does not depend on the default being valid.
+  assert.equal((await call({ method: "GET", url: "/api/inference?provider=%20OLLAMA%20" })).statusCode, 200);
+});
+
+test("the fallback disable flag applies to both providers", async () => {
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  assert.equal((await call({ method: "GET", url: "/api/inference?provider=ollama" })).statusCode, 200);
+  assert.equal((await call({ method: "GET", url: "/api/inference?provider=gemini" })).statusCode, 200);
+  process.env.INFERENCE_FALLBACK_ENABLED = "false";
+  for (const provider of ["ollama", "gemini"]) {
+    assert.equal((await call({ url: `/api/inference?provider=${provider}` })).body.error, "disabled");
+  }
+});
+
+test("providers use their own configured models or built-in defaults", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_MODEL = "gemini-custom-model";
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://generativelanguage.googleapis.com/")) {
+      assert.match(url, /models\/gemini-custom-model:generateContent/);
+      return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+    }
+    assert.equal(JSON.parse(init.body).model, "gemma4:31b");
+    return success();
+  };
+  assert.equal((await call()).statusCode, 200);
+  assert.equal((await call({ url: "/api/inference?provider=ollama" })).statusCode, 200);
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  process.env.OLLAMA_MODEL = "ollama-custom-model";
+  delete process.env.GEMINI_MODEL;
+  globalThis.fetch = async (url, init) => {
+    if (url === "https://ollama.com/api/chat") {
+      assert.equal(JSON.parse(init.body).model, "ollama-custom-model");
+      return success();
+    }
+    assert.match(url, /models\/gemma-4-31b-it:generateContent/);
+    return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+  };
+  assert.equal((await call()).statusCode, 200);
+  assert.equal((await call({ url: "/api/inference?provider=gemini" })).statusCode, 200);
+});
+
+test("concurrent provider selections keep their credentials and models separate", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_MODEL = "gemini-test-model";
+  process.env.OLLAMA_MODEL = "ollama-test-model";
+  globalThis.fetch = async (url, init) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (url === "https://ollama.com/api/chat") {
+      assert.equal(init.headers.Authorization, "Bearer test-ollama-key");
+      assert.equal(JSON.parse(init.body).model, "ollama-test-model");
+      return success("Ollama answer");
+    }
+    assert.match(url, /models\/gemini-test-model:generateContent\?key=test-gemini-key$/);
+    assert.equal(init.headers.Authorization, undefined);
+    return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+  };
+  const [ollama, gemini] = await Promise.all([
+    call({ url: "/api/inference?provider=ollama" }), call({ url: "/api/inference?provider=gemini" }),
+  ]);
+  assert.equal(ollama.statusCode, 200);
+  assert.deepEqual(ollama.body, { content: "Ollama answer", model: "ollama-test-model" });
+  assert.equal(gemini.statusCode, 200);
+  assert.deepEqual(gemini.body, { content: "Gemini answer", model: "gemini-test-model" });
+  assert.equal(process.env.DEFAULT_INFERENCE_PROVIDER, "gemini");
+});
+
+test("the client daily limit is shared across provider selections", async () => {
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  globalThis.fetch = async () => Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+  const token = crypto.randomUUID();
+  const request = { token, url: "/api/inference?provider=gemini" };
+  assert.equal((await call(request)).statusCode, 200);
+  assert.equal((await call(request)).body.error, "client_limit");
+  assert.equal((await call({ token, url: "/api/inference?provider=ollama" })).body.error, "client_limit");
+});
+
+test("model and credential failures remain distinct from provider overload", async () => {
+  for (const [status, error] of [[404, "model_unavailable"], [401, "provider_auth"], [403, "provider_auth"], [503, "provider_busy"]]) {
+    globalThis.fetch = async () => new Response("Provider rejected request", { status });
+    const response = await call();
+    assert.equal(response.body.error, error);
+    assert.equal(response.statusCode, status === 503 ? 503 : 502);
+  }
+});
+
+test("Ollama receives downloaded and inline images as base64", async () => {
+  const imageCalls = mockPinnedHttpsImage(new Uint8Array([1, 2, 3]));
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push(url);
+    assert.equal(url, "https://ollama.com/api/chat");
+    assert.deepEqual(JSON.parse(options.body).messages, [{ role: "user", content: "Describe these", images: ["AQID", "BAUG"] }]);
+    return success();
+  };
+  const response = await call({ body: { webSearch: false, messages: [{ role: "user", content: [
+    { type: "image", url: "https://images.example.test/photo.png" },
+    { type: "image", mediaType: "image/png", data: "BAUG" },
+    { type: "text", text: "Describe these" },
+  ] }] } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(imageCalls[0].hostname, "203.0.113.10");
+  assert.equal(imageCalls[0].headers.Host, "images.example.test");
+  assert.equal(imageCalls[0].servername, "images.example.test");
+});
+
+test("blocked image destinations are not fetched and Ollama still explains the note", async () => {
+  imageFetchDns.lookupAll = async () => [{ address: "127.0.0.1", family: 4 }];
+  const imageRequests = mock.method(https, "request", () => {
+    throw new Error("must not fetch a private image");
+  });
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push(String(url));
+    assert.equal(url, "https://ollama.com/api/chat");
+    assert.deepEqual(JSON.parse(options.body).messages, [
+      { role: "system", content: "Explain a public Nostr note." },
+      {
+        role: "user",
+        content: "Describe this\n\nhttps://127.0.0.1.nip.io/photo.png",
+      },
+    ]);
+    return success();
+  };
+  const response = await call({ body: { webSearch: false, messages: [
+    { role: "system", content: `Explain a public Nostr note.\n${SYSTEM_PROMPT_IMAGES_LINE}` },
+    { role: "user", content: [
+      { type: "image", url: "https://127.0.0.1.nip.io/photo.png" },
+      { type: "text", text: "Describe this" },
+    ] },
+  ] } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(imageRequests.mock.callCount(), 0);
+  assert.deepEqual(requests, ["https://ollama.com/api/chat"]);
+});
+
+test("web search tools execute on ollama.com and append sources to the final answer", async () => {
+  const paths = [];
+  globalThis.fetch = async (url, options) => {
+    paths.push(url);
+    assert.equal(options.headers.Authorization, "Bearer test-ollama-key");
+    const body = JSON.parse(options.body);
+    if (paths.length === 1) {
+      assert.equal(body.tools[0].function.name, "web_search");
+      return Response.json({ message: { role: "assistant", content: "", tool_calls: [
+        { function: { name: "web_search", arguments: { query: "Nostr protocol" } } },
+      ] } });
+    }
+    if (url.endsWith("/web_search")) {
+      assert.deepEqual(body, { query: "Nostr protocol", max_results: 3 });
+      return Response.json({ results: [{ title: "Nostr", url: "https://nostr.com", content: "A protocol" }] });
+    }
+    assert.equal(body.messages.at(-1).role, "tool");
+    assert.equal(JSON.parse(body.messages.at(-1).content).results[0].url, "https://nostr.com");
+    return success("Nostr is a protocol.");
+  };
+  const response = await call({ body: { messages, webSearch: true } });
+  assert.equal(response.statusCode, 200);
+  assert.match(response.body.content, /\[Nostr\]\(https:\/\/nostr.com\)/);
+  assert.deepEqual(paths, ["https://ollama.com/api/chat", "https://ollama.com/api/web_search", "https://ollama.com/api/chat"]);
+});
+
+test("Ollama 429 starts a cooldown, preserves Retry-After and releases the daily allowance", async () => {
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
+  const token = crypto.randomUUID();
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return new Response("Too many requests", { status: 429, headers: { "Retry-After": "30" } });
+  };
+  const response = await call({ token });
+  assert.equal(response.statusCode, 429);
+  assert.equal(response.body.error, "rate_limited");
+  assert.equal(response.headers["Retry-After"], "30");
+  assert.equal((await call({ token: "other-browser" })).statusCode, 429);
+  assert.equal(requests, 1);
+  time += 30_000;
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ token })).statusCode, 200);
+  assert.equal((await call({ token })).body.error, "client_limit");
+});
+
+test("local request limits count failed attempts and block rotated browser tokens", async () => {
+  process.env.OLLAMA_REQUESTS_PER_MINUTE = "1";
+  let requests = 0;
+  globalThis.fetch = async () => { requests++; throw new Error("network failure"); };
+  assert.equal((await call()).statusCode, 502);
+  const blocked = await call();
+  assert.equal(blocked.statusCode, 429);
+  assert.equal(blocked.headers["Retry-After"], "60");
+  assert.equal(requests, 1);
+  time += 60_000;
+  globalThis.fetch = async () => success();
+  assert.equal((await call()).statusCode, 200);
+});
+
+test("browser minute limits apply even when failed explanations release daily quota", async () => {
+  process.env.OLLAMA_CLIENT_REQUESTS_PER_MINUTE = "1";
+  const token = crypto.randomUUID();
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return new Response("Bad gateway", { status: 502 });
+  };
+  assert.equal((await call({ token })).statusCode, 503);
+  assert.equal((await call({ token })).body.error, "rate_limited");
+  assert.equal(requests, 1);
+  assert.equal((await call()).statusCode, 503);
+  time += 60_000;
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ token })).statusCode, 200);
+});
+
+test("search and continuation calls use the same upstream request budget", async () => {
+  process.env.OLLAMA_REQUESTS_PER_MINUTE = "2";
+  let requests = 0;
+  globalThis.fetch = async (url) => {
+    requests++;
+    if (url.endsWith("/web_search")) return Response.json({ results: [] });
+    return Response.json({ message: { role: "assistant", tool_calls: [
+      { function: { name: "web_search", arguments: { query: "Nostr" } } },
+    ] } });
+  };
+  const response = await call({ body: { messages, webSearch: true } });
+  assert.equal(response.statusCode, 429);
+  assert.equal(response.body.error, "rate_limited");
+  assert.equal(requests, 2);
+});
+
+test("search quota errors advise disabling search and do not retry the provider", async () => {
+  let requests = 0;
+  globalThis.fetch = async (url) => {
+    requests++;
+    if (url.endsWith("/web_search")) return new Response("Quota", { status: 429 });
+    return Response.json({ message: { role: "assistant", tool_calls: [
+      { function: { name: "web_search", arguments: { query: "Nostr" } } },
+    ] } });
+  };
+  const response = await call({ body: { messages, webSearch: true } });
+  assert.equal(response.statusCode, 429);
+  assert.equal(response.body.error, "search_quota");
+  assert.equal(response.headers["Retry-After"], "60");
+  assert.equal(requests, 2);
+});
+
+test("search tools stop after two searches, and unexpected tools never execute", async () => {
+  const paths = [];
+  globalThis.fetch = async (url, options) => {
+    paths.push(url);
+    if (url.endsWith("/web_search")) return Response.json({ results: [] });
+    const body = JSON.parse(options.body);
+    if (paths.length === 5) {
+      assert.equal(body.tools, undefined);
+      return success();
+    }
+    return Response.json({ message: { role: "assistant", content: "", tool_calls: [
+      { function: { name: "web_search", arguments: { query: "Nostr" } } },
+    ] } });
+  };
+  assert.equal((await call({ body: { messages, webSearch: true } })).statusCode, 200);
+  assert.equal(paths.length, 5);
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return Response.json({ message: { role: "assistant", tool_calls: [
+      { function: { name: "web_fetch", arguments: { url: "http://localhost" } } },
+    ] } });
+  };
+  assert.equal((await call({ body: { messages, webSearch: true } })).statusCode, 502);
+  assert.equal(requests, 1);
+});
+
+test("concurrent explanations are capped and slots recover after provider failure", async () => {
+  process.env.OLLAMA_MAX_CONCURRENT = "1";
+  let complete;
+  globalThis.fetch = () => new Promise((resolve) => { complete = resolve; });
+  const first = call();
+  assert.equal((await call()).statusCode, 429);
+  complete(new Response("Busy", { status: 503 }));
+  assert.equal((await first).body.error, "provider_busy");
+  globalThis.fetch = async () => success();
+  assert.equal((await call()).statusCode, 200);
+});
+
+test("malformed, empty and timed out responses release the daily allowance", async () => {
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
+  const token = crypto.randomUUID();
+  for (const response of [new Response("not-json"), Response.json({ message: { role: "assistant", content: "" } })]) {
+    globalThis.fetch = async () => response;
+    assert.equal((await call({ token })).statusCode, 502);
+  }
+  const originalTimeout = AbortSignal.timeout;
+  try {
+    AbortSignal.timeout = () => AbortSignal.abort(new DOMException("Timed out", "TimeoutError"));
+    assert.equal((await call({ token })).body.error, "provider_busy");
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ token })).statusCode, 200);
+});
+
+test("Ollama preserves response language instructions and explicit follow-up requests", async () => {
+  const languagePrompt = "Respond in the browser language (es-MX), unless the user requests another language.";
+  const conversation = [
+    { role: "system", content: languagePrompt },
+    { role: "user", content: "A trending Nostr note:\nNote: Hello Nostr!" },
+    { role: "assistant", content: "Es un saludo a la comunidad." },
+    { role: "user", content: "Reply in French: what is a relay?" },
+  ];
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.messages[0].content, languagePrompt);
+    assert.equal(body.messages.at(-1).content, "Reply in French: what is a relay?");
+    return success("Un relais transmet les événements.");
+  };
+  const response = await call({ body: { messages: conversation, webSearch: false } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.content, "Un relais transmet les événements.");
+});
+
+test("Ollama maps reasoning efforts and omits think for automatic behavior", async () => {
+  for (const effort of [undefined, "auto", "none", "low", "medium", "high"]) {
+    time += 60_000;
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(init.body);
+      assert.equal(body.think, effort === undefined || effort === "auto" ? undefined : effort !== "none");
+      return success();
+    };
+    assert.equal((await call({ body: { messages, webSearch: false,
+      options: { reasoningEffort: effort } } })).statusCode, 200);
+  }
+});
+
+test("Ollama rejects malformed tools without executing searches", async () => {
+  for (const tool of [
+    null, { function: { name: "web_search", arguments: { query: " " } } },
+    { function: { name: "web_search", arguments: { query: "x".repeat(1001) } } },
+    { function: { name: "web_search", arguments: '{"query":"Nostr"}' } },
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return Response.json({ message: { role: "assistant", tool_calls: [tool] } });
+    };
+    assert.equal((await call({ body: { messages, webSearch: true } })).body.error, "provider_error");
+    assert.equal(calls, 1);
+  }
+});
+
+test("disabled search and excessive tool calls never execute searches", async () => {
+  const tool = { function: { name: "web_search", arguments: { query: "Nostr" } } };
+  for (const [webSearch, tools] of [[false, [tool]], [true, [tool, tool, tool]]]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return Response.json({ message: { role: "assistant", tool_calls: tools } });
+    };
+    assert.equal((await call({ body: { messages, webSearch } })).statusCode, 502);
+    assert.equal(calls, 1);
+  }
+});
+
+test("malformed Ollama chat and search replies preserve provider_error", async () => {
+  for (const data of [null, {}, { error: "bad" }, { message: { role: "user", content: "bad role" } }]) {
+    globalThis.fetch = async () => Response.json(data);
+    assert.equal((await call()).body.error, "provider_error");
+  }
+  time += 60_000;
+  globalThis.fetch = async (url) => url.endsWith("/web_search")
+    ? Response.json({ results: "not an array" })
+    : Response.json({ message: { role: "assistant", tool_calls: [
+      { function: { name: "web_search", arguments: { query: "Nostr" } } },
+    ] } });
+  assert.equal((await call({ body: { messages, webSearch: true } })).body.error, "provider_error");
+});

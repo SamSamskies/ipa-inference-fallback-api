@@ -1,0 +1,1054 @@
+/**
+ * Hosted inference fallback. The public contract is generic so the provider
+ * behind this file can change without renaming `/api/inference`.
+ *
+ * Default: Ollama Cloud. Callers can select a provider with ?provider=.
+ * The key stays server-side. Local: `npx vercel dev` (loads `.env.local`).
+ *
+ * Extracted as Node ESM from the frontend apps; prompts and consent belong
+ * to callers. Provider adapters and app authentication follow separately.
+ */
+
+import dns from "node:dns/promises";
+import { isIP } from "node:net";
+import { scheduler } from "node:timers/promises";
+import { clientQuota } from "../lib/client-quota.js";
+import { envInt, loadLocalEnvFallback } from "../lib/env.js";
+import { completeOllama } from "../lib/ollama.js";
+import { completeReplit } from "../lib/replit.js";
+import { PROVIDER_CONFIG } from "../lib/provider-config.js";
+import { requestTimeoutMs } from "../lib/timeouts.js";
+import { ollamaLimiter } from "../lib/ollama-limits.js";
+import {
+  applyCors,
+  INFERENCE_CLIENT_HEADER,
+  originAllowed,
+} from "../lib/http.js";
+import {
+  discardBody,
+  isPrivateOrLocalHostname,
+  pinnedFetch,
+} from "../lib/safeUrl.js";
+
+const MAX_BODY_BYTES = 100_000;
+const MAX_PROMPT_CHARS = 60_000;
+const DEFAULT_CLIENT_DAILY = 50;
+
+loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_"]);
+
+function defaultProviderId() {
+  return process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
+}
+
+function apiKey(provider) {
+  return process.env[PROVIDER_CONFIG[provider].keyEnv]?.trim() || "";
+}
+
+function fallbackEnabled(provider) {
+  const flag = (process.env.INFERENCE_FALLBACK_ENABLED ?? "")
+    .trim()
+    .toLowerCase();
+  if (flag === "0" || flag === "false" || flag === "off") return false;
+  return Boolean(apiKey(provider));
+}
+
+function modelId(provider) {
+  return process.env[PROVIDER_CONFIG[provider].modelEnv]?.trim() || PROVIDER_CONFIG[provider].defaultModel;
+}
+
+function clientDailyLimit() {
+  return envInt("INFERENCE_CLIENT_DAILY_LIMIT", DEFAULT_CLIENT_DAILY);
+}
+
+function tryConsumeClient(key, limit) {
+  return clientQuota.tryConsume(key, limit);
+}
+
+function releaseClient(reservation) {
+  return clientQuota.release(reservation);
+}
+
+function commitClient(reservation) {
+  return clientQuota.commit(reservation);
+}
+
+const IMAGE_MEDIA_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+
+function guessImageMime(url) {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    if (path.endsWith(".png")) return "image/png";
+    if (path.endsWith(".webp")) return "image/webp";
+    if (path.endsWith(".gif")) return "image/gif";
+    if (
+      path.endsWith(".jpg") ||
+      path.endsWith(".jpeg") ||
+      path.endsWith(".jfif")
+    ) {
+      return "image/jpeg";
+    }
+  } catch {
+    // ignore
+  }
+  return "image/jpeg";
+}
+
+function normalizeImageMime(raw) {
+  if (typeof raw !== "string") return undefined;
+  const mime = raw.trim().toLowerCase();
+  if (mime === "image/jpg") return "image/jpeg";
+  if (IMAGE_MEDIA_TYPES.has(mime)) return mime;
+  return undefined;
+}
+
+/** Map IPA ContentPart[] / string into Gemini generateContent parts. */
+function toGeminiParts(content) {
+  if (typeof content === "string") {
+    return content.trim() ? [{ text: content }] : [];
+  }
+  if (!Array.isArray(content)) return [];
+
+  const parts = [];
+  for (const part of content) {
+    if (part == null || typeof part !== "object") continue;
+    if (part.type === "text" && typeof part.text === "string") {
+      if (part.text.trim()) parts.push({ text: part.text });
+      continue;
+    }
+    if (part.type !== "image") continue;
+
+    if (typeof part.url === "string" && part.url.trim()) {
+      const mime =
+        normalizeImageMime(part.mediaType) || guessImageMime(part.url);
+      parts.push({
+        fileData: {
+          fileUri: part.url.trim(),
+          mimeType: mime,
+        },
+      });
+      continue;
+    }
+
+    const mime = normalizeImageMime(part.mediaType);
+    const data = typeof part.data === "string" ? part.data.trim() : "";
+    if (mime && data) {
+      parts.push({
+        inlineData: {
+          mimeType: mime,
+          data,
+        },
+      });
+    }
+  }
+  return parts;
+}
+
+function toGeminiContents(messages) {
+  let system = "";
+  const contents = [];
+
+  for (const msg of messages) {
+    if (msg == null || typeof msg !== "object") continue;
+    if (msg.role === "system") {
+      const content = typeof msg.content === "string" ? msg.content : "";
+      if (content.trim()) {
+        system = system ? `${system}\n\n${content}` : content;
+      }
+      continue;
+    }
+
+    const parts = toGeminiParts(msg.content);
+    if (parts.length === 0) continue;
+
+    const role = msg.role === "assistant" ? "model" : "user";
+    const prev = contents[contents.length - 1];
+    if (prev && prev.role === role) {
+      // Merge consecutive same-role turns (text-only concat when both are plain text).
+      const prevOnlyText =
+        prev.parts.length === 1 && typeof prev.parts[0].text === "string";
+      const nextOnlyText =
+        parts.length === 1 && typeof parts[0].text === "string";
+      if (prevOnlyText && nextOnlyText) {
+        prev.parts[0].text += `\n\n${parts[0].text}`;
+      } else {
+        prev.parts.push(...parts);
+      }
+    } else {
+      contents.push({ role, parts });
+    }
+  }
+
+  if (contents.length === 0) return null;
+  if (contents[0].role !== "user") return null;
+  if (contents[contents.length - 1]?.role !== "user") return null;
+  return { system: system.trim(), contents };
+}
+
+function promptChars(system, contents) {
+  let total = system.length;
+  for (const content of contents) {
+    for (const part of content.parts) {
+      if (typeof part.text === "string") total += part.text.length;
+      else if (part.fileData?.fileUri) total += part.fileData.fileUri.length;
+      else if (part.inlineData?.data) total += part.inlineData.data.length;
+    }
+  }
+  return total;
+}
+
+function inlineImageBytes(contents) {
+  let total = 0;
+  for (const content of contents) {
+    for (const part of content.parts) {
+      const data = part.inlineData?.data;
+      if (typeof data !== "string" || !data) continue;
+      const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+      total += Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+    }
+  }
+  return total;
+}
+
+const MAX_INLINE_IMAGE_BYTES = 4_000_000;
+const MAX_IMAGE_FETCH_REDIRECTS = 5;
+
+function contentsHaveFileData(contents) {
+  return contents.some((content) =>
+    content.parts.some((part) => part.fileData?.fileUri)
+  );
+}
+
+function contentsHaveInlineData(contents) {
+  return contents.some((content) =>
+    content.parts.some((part) => part.inlineData)
+  );
+}
+
+// Remove the client's vision hint when no images survive fetching. The service
+// never adds application prompts; the frontends own this instruction.
+const VISION_SYSTEM_LINE =
+  "The first user message includes the note's images before the text. Look at those images when they matter.";
+
+function stripVisionSystemLine(system) {
+  if (typeof system !== "string" || !system) return system;
+  return system
+    .split("\n")
+    .filter((line) => line !== VISION_SYSTEM_LINE)
+    .join("\n");
+}
+
+/** Turn unresolved fileData into text URLs so a failed fetch still explains the note. */
+function fallbackUnreadImages(contents) {
+  return contents.map((content) => {
+    const kept = [];
+    const unreadUrls = [];
+    for (const part of content.parts) {
+      if (part.fileData?.fileUri) unreadUrls.push(part.fileData.fileUri);
+      else kept.push(part);
+    }
+    if (unreadUrls.length === 0) return content;
+    const existingText = kept
+      .filter((part) => typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n\n");
+    const extraUrls = unreadUrls.filter((url) => url && !existingText.includes(url));
+    if (extraUrls.length === 0) return { ...content, parts: kept };
+    const extra = extraUrls.join("\n");
+    const parts = kept.slice();
+    let lastText = -1;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (typeof parts[i].text === "string") {
+        lastText = i;
+        break;
+      }
+    }
+    if (lastText >= 0) {
+      const text = parts[lastText].text;
+      parts[lastText] = { text: text ? `${text}\n\n${extra}` : extra };
+    } else {
+      parts.push({ text: extra });
+    }
+    return { ...content, parts };
+  });
+}
+
+/**
+ * DNS lookup used before fetching note images. Tests replace `lookupAll` so
+ * they can simulate public vs private answers without a network.
+ */
+export const imageFetchDns = {
+  lookupAll(hostname) {
+    return dns.lookup(hostname, { all: true });
+  },
+};
+
+async function assertSafeImageFetchUrl(fileUri, base) {
+  let parsed;
+  try {
+    parsed = base ? new URL(fileUri, base) : new URL(fileUri);
+  } catch {
+    throw new Error("image_fetch_url");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("image_fetch_url");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("image_fetch_url");
+  }
+  if (isPrivateOrLocalHostname(parsed.hostname)) {
+    throw new Error("image_fetch_url");
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host)) {
+    return { url: parsed, address: host, family: host.includes(":") ? 6 : 4 };
+  }
+  let records;
+  try {
+    records = await imageFetchDns.lookupAll(host);
+  } catch {
+    throw new Error("image_fetch_url");
+  }
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error("image_fetch_url");
+  }
+  for (const record of records) {
+    const address = record?.address;
+    if (!address || isPrivateOrLocalHostname(address)) {
+      throw new Error("image_fetch_url");
+    }
+  }
+  const first = records[0];
+  return {
+    url: parsed,
+    address: first.address,
+    family: first.family ?? (first.address.includes(":") ? 6 : 4),
+  };
+}
+
+async function fetchImageAsInlineData(fileUri, mimeType, signal) {
+  let current = await assertSafeImageFetchUrl(fileUri);
+  let res;
+
+  for (let hop = 0; hop <= MAX_IMAGE_FETCH_REDIRECTS; hop++) {
+    res = await pinnedFetch(current, {
+      signal,
+      headers: {
+        // Some media CDNs reject bare bot fetches.
+        Accept: "image/*,*/*;q=0.8",
+        "User-Agent": "ipa-inference-fallback-api/1.0",
+      },
+    });
+
+    if (res.status < 300 || res.status >= 400) break;
+
+    const location = res.headers.get("location");
+    await discardBody(res);
+    if (!location) throw new Error("image_fetch_url");
+    // Re-validate every hop so redirects cannot pivot into private/metadata nets.
+    current = await assertSafeImageFetchUrl(location, current.url.href);
+  }
+
+  if (!res || (res.status >= 300 && res.status < 400)) {
+    await discardBody(res);
+    throw new Error("image_fetch_url");
+  }
+  if (!res.ok) {
+    await discardBody(res);
+    throw new Error(`image_fetch_http_${res.status}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.byteLength === 0 || buffer.byteLength > MAX_INLINE_IMAGE_BYTES) {
+    throw new Error("image_fetch_size");
+  }
+  const headerMime = normalizeImageMime(
+    (res.headers.get("content-type") || "").split(";")[0]
+  );
+  const mime =
+    headerMime ||
+    normalizeImageMime(mimeType) ||
+    guessImageMime(current.url.href);
+  return {
+    inlineData: {
+      mimeType: mime,
+      data: buffer.toString("base64"),
+    },
+  };
+}
+
+/**
+ * Resolve `{ fileData }` to `{ inlineData }` in our process. Google's URL fetch
+ * often fails or 503s on Nostr/Blossom CDNs; bytes we can reach work more often.
+ * Leave fileData only when our fetch fails; provider paths then fall back to
+ * a text URL (Gemini below, Ollama in toMessages).
+ */
+function isAbortError(error, signal) {
+  return Boolean(signal?.aborted) || error?.name === "AbortError" || error?.name === "TimeoutError";
+}
+
+async function resolveImagesToInline(contents, signal) {
+  const next = [];
+  for (const content of contents) {
+    const parts = [];
+    for (const part of content.parts) {
+      if (!part.fileData?.fileUri) {
+        parts.push(part);
+        continue;
+      }
+      try {
+        parts.push(
+          await fetchImageAsInlineData(
+            part.fileData.fileUri,
+            part.fileData.mimeType,
+            signal
+          )
+        );
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
+        console.warn("[api/inference] image fetch failed", {
+          uri: String(part.fileData.fileUri).slice(0, 120),
+          error: error instanceof Error ? error.message : "unknown",
+        });
+        parts.push(part);
+      }
+    }
+    next.push({ ...content, parts });
+  }
+  return next;
+}
+
+const RETRYABLE_GEMINI_STATUS = new Set([
+  "INTERNAL",
+  "UNAVAILABLE",
+  "RESOURCE_EXHAUSTED",
+  "DEADLINE_EXCEEDED",
+  "ABORTED",
+  "UNKNOWN",
+]);
+
+function looksLikeCapacityError(errJson, httpStatus) {
+  if (httpStatus !== 500 && httpStatus !== 503 && httpStatus !== 502) {
+    return false;
+  }
+  const providerStatus =
+    errJson && typeof errJson === "object" ? errJson?.error?.status : null;
+  // Gemini often returns opaque 500 INTERNAL / "Internal error encountered"
+  // under load; treat like capacity rather than a hard provider failure.
+  if (providerStatus === "INTERNAL" || providerStatus === "UNAVAILABLE") {
+    return true;
+  }
+  const text = collectStrings(errJson).join(" ");
+  return /high demand|try again later|temporarily|UNAVAILABLE|overloaded|capacity|internal error/i.test(
+    text
+  );
+}
+
+function isHardGeminiProviderStatus(status) {
+  return typeof status === "string" && status.length > 0 && !RETRYABLE_GEMINI_STATUS.has(status);
+}
+
+function sendGeminiProviderFailure(res, httpStatus, errJson) {
+  const providerStatus =
+    errJson && typeof errJson === "object" ? errJson.error?.status : undefined;
+  if (httpStatus >= 500 && !isHardGeminiProviderStatus(providerStatus)) {
+    res.status(503).json({
+      error: "provider_busy",
+      http: httpStatus,
+      ...(providerStatus ? { providerStatus } : {}),
+    });
+    return;
+  }
+  res.status(400).json({
+    error: "provider_error",
+    http: httpStatus,
+    ...(providerStatus ? { providerStatus } : {}),
+  });
+}
+
+function readBody(req) {
+  if (typeof req.body === "string") return req.body;
+  if (req.body == null) return "";
+  return JSON.stringify(req.body);
+}
+
+function clientToken(req) {
+  const header = req.headers[INFERENCE_CLIENT_HEADER.toLowerCase()];
+  return typeof header === "string" ? header.trim() : "";
+}
+
+export default async function handler(req, res) {
+  applyCors(res, req);
+
+  if (req.method === "OPTIONS") {
+    if (req.headers.origin && !originAllowed(req)) {
+      res.status(403).end();
+      return;
+    }
+    res.status(204).end();
+    return;
+  }
+
+  const requestedProviders = new URL(
+    req.url || "/api/inference", "http://localhost"
+  ).searchParams.getAll("provider");
+  const explicitProvider = requestedProviders.length > 0;
+  const provider = explicitProvider
+    ? requestedProviders[0].trim().toLowerCase()
+    : defaultProviderId();
+  if (requestedProviders.length > 1 || !Object.hasOwn(PROVIDER_CONFIG, provider)) {
+    res.status(explicitProvider ? 400 : 503).json({ error: "invalid_provider" });
+    return;
+  }
+
+  if (req.method === "GET") {
+    if (fallbackEnabled(provider)) {
+      res.status(200).json({ ok: true });
+      return;
+    }
+    res.status(503).json({
+      ok: false,
+      error: apiKey(provider) ? "disabled" : "missing_api_key",
+    });
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "method_not_allowed" });
+    return;
+  }
+
+  if (!fallbackEnabled(provider)) {
+    res.status(503).json({
+      error: apiKey(provider) ? "disabled" : "missing_api_key",
+    });
+    return;
+  }
+
+  if (!originAllowed(req)) {
+    res.status(403).json({ error: "forbidden_origin" });
+    return;
+  }
+
+  const contentLength = Number(req.headers["content-length"] || "0");
+  if (contentLength > MAX_BODY_BYTES) {
+    res.status(413).json({ error: "payload_too_large" });
+    return;
+  }
+
+  let body;
+  try {
+    const text = readBody(req);
+    if (text.length > MAX_BODY_BYTES) {
+      res.status(413).json({ error: "payload_too_large" });
+      return;
+    }
+    body =
+      typeof req.body === "object" && req.body != null
+        ? req.body
+        : JSON.parse(text);
+  } catch {
+    res.status(400).json({ error: "invalid_json" });
+    return;
+  }
+
+  if (!Array.isArray(body?.messages) || body.messages.length === 0) {
+    res.status(400).json({ error: "invalid_request" });
+    return;
+  }
+
+  const prompt = toGeminiContents(body.messages);
+  if (!prompt) {
+    res.status(400).json({ error: "invalid_request" });
+    return;
+  }
+  if (promptChars(prompt.system, prompt.contents) > MAX_PROMPT_CHARS) {
+    res.status(413).json({ error: "payload_too_large" });
+    return;
+  }
+
+  const options = parseInferenceOptions(body.options);
+  if (options === null) {
+    res.status(400).json({ error: "invalid_request" });
+    return;
+  }
+
+  const useWebSearch = parseWebSearch(body.webSearch);
+  if (useWebSearch === null) {
+    res.status(400).json({ error: "invalid_request" });
+    return;
+  }
+
+  const clientId = clientToken(req);
+  if (!clientId) {
+    res.status(400).json({ error: "missing_client_token" });
+    return;
+  }
+
+  const reservation = await tryConsumeClient(clientId, clientDailyLimit());
+  if (typeof reservation === "string") {
+    res.status(429).json({ error: reservation });
+    return;
+  }
+
+  if (provider === "ollama" || provider === "replit") {
+    let finish;
+    const signal = AbortSignal.timeout(requestTimeoutMs());
+    try {
+      if (provider === "ollama") finish = ollamaLimiter.begin(clientId);
+      const resolvedPrompt = {
+        ...prompt,
+        contents: contentsHaveFileData(prompt.contents)
+          ? await resolveImagesToInline(prompt.contents, signal)
+          : prompt.contents,
+      };
+      if (inlineImageBytes(resolvedPrompt.contents) > MAX_INLINE_IMAGE_BYTES) {
+        await releaseClient(reservation);
+        res.status(413).json({ error: "payload_too_large" });
+        return;
+      }
+      if (provider === "replit") {
+        resolvedPrompt.contents = fallbackUnreadImages(resolvedPrompt.contents);
+        if (!contentsHaveInlineData(resolvedPrompt.contents)) {
+          resolvedPrompt.system = stripVisionSystemLine(resolvedPrompt.system);
+        }
+      }
+      const complete = provider === "ollama" ? completeOllama : completeReplit;
+      const result = await complete({
+        prompt: resolvedPrompt,
+        model: modelId(provider),
+        key: apiKey(provider),
+        options,
+        webSearch: useWebSearch,
+        signal,
+      });
+      await commitClient(reservation);
+      res.status(200).json({
+        content: withSources(result.content, result.sources),
+        model: result.model,
+      });
+    } catch (error) {
+      await releaseClient(reservation);
+      if (error?.retryAfter) res.setHeader("Retry-After", String(error.retryAfter));
+      const status = signal.aborted ? 503 : error?.status || 502;
+      res.status(status).json({
+        error: signal.aborted ? "provider_busy" : error?.status ? error.message : "provider_error",
+      });
+    } finally {
+      finish?.();
+    }
+    return;
+  }
+
+  const key = apiKey(provider);
+  const model = modelId(provider);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+
+  const generationConfig = {};
+  const thinkingConfig = thinkingConfigForEffort(
+    model,
+    options.reasoningEffort
+  );
+  if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
+  if (options.temperature !== undefined) {
+    generationConfig.temperature = options.temperature;
+  }
+
+  // Client may omit web search to avoid Google Search grounding cost.
+  const geminiBody = {
+    contents: prompt.contents,
+  };
+  if (useWebSearch) {
+    geminiBody.tools = [{ googleSearch: {} }];
+  }
+  if (prompt.system) {
+    geminiBody.systemInstruction = {
+      parts: [{ text: prompt.system }],
+    };
+  }
+  if (Object.keys(generationConfig).length > 0) {
+    geminiBody.generationConfig = generationConfig;
+  }
+
+  // Bound image fetching, generation, and the capacity retry within Vercel's limit.
+  const requestSignal = AbortSignal.timeout(requestTimeoutMs());
+
+  // Hosted path: pull image bytes ourselves first. Relying on Gemini fileUri
+  // fetch for Nostr CDNs often returns 503 / fetch failures.
+  if (contentsHaveFileData(geminiBody.contents)) {
+    try {
+      geminiBody.contents = await resolveImagesToInline(geminiBody.contents, requestSignal);
+    } catch (error) {
+      await releaseClient(reservation);
+      if (isAbortError(error, requestSignal)) {
+        res.status(503).json({ error: "provider_busy" });
+        return;
+      }
+      throw error;
+    }
+  }
+  geminiBody.contents = fallbackUnreadImages(geminiBody.contents);
+  if (inlineImageBytes(geminiBody.contents) > MAX_INLINE_IMAGE_BYTES) {
+    await releaseClient(reservation);
+    res.status(413).json({ error: "payload_too_large" });
+    return;
+  }
+  if (
+    geminiBody.systemInstruction &&
+    !contentsHaveInlineData(geminiBody.contents)
+  ) {
+    const system = stripVisionSystemLine(
+      geminiBody.systemInstruction.parts?.[0]?.text
+    );
+    if (system) {
+      geminiBody.systemInstruction = { parts: [{ text: system }] };
+    } else {
+      delete geminiBody.systemInstruction;
+    }
+  }
+
+  async function postGemini(body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: requestSignal,
+    });
+  }
+
+  let geminiRes;
+  try {
+    geminiRes = await postGemini(geminiBody);
+  } catch {
+    await releaseClient(reservation);
+    if (requestSignal.aborted) {
+      res.status(503).json({ error: "provider_busy" });
+      return;
+    }
+    res.status(502).json({ error: "provider_error" });
+    return;
+  }
+
+  // One capacity retry for transient Gemini 5xx (503 high demand, 500 INTERNAL).
+  if (
+    geminiRes.status === 500 ||
+    geminiRes.status === 502 ||
+    geminiRes.status === 503
+  ) {
+    let errJson = null;
+    try {
+      errJson = await geminiRes.json();
+    } catch {
+      errJson = null;
+    }
+    const capacity = looksLikeCapacityError(errJson, geminiRes.status);
+    if (capacity) {
+      console.warn("[api/inference] provider capacity; retrying once", {
+        http: geminiRes.status,
+        status: errJson?.error?.status,
+        message: geminiErrorMessage(errJson)?.slice(0, 200),
+      });
+      try {
+        await scheduler.wait(800, { signal: requestSignal });
+        geminiRes = await postGemini(geminiBody);
+      } catch {
+        await releaseClient(reservation);
+        res.status(503).json({ error: "provider_busy" });
+        return;
+      }
+      // Fall through to normal status handling with the retry response.
+    } else {
+      await releaseClient(reservation);
+      const providerStatus = errJson?.error?.status;
+      console.warn("[api/inference] provider error", {
+        http: geminiRes.status,
+        status: providerStatus,
+        message: geminiErrorMessage(errJson)?.slice(0, 200),
+      });
+      sendGeminiProviderFailure(res, geminiRes.status, errJson);
+      return;
+    }
+  }
+
+  if (geminiRes.status === 429) {
+    await releaseClient(reservation);
+    let quota = "rate";
+    let errJson = null;
+    try {
+      errJson = await geminiRes.json();
+      quota = classifyGemini429(errJson);
+      console.warn("[api/inference] provider 429", {
+        kind: quota,
+        webSearch: useWebSearch,
+        quotaIds: collectQuotaIds(errJson),
+        message: geminiErrorMessage(errJson)?.slice(0, 200),
+      });
+    } catch {
+      console.warn("[api/inference] provider 429", {
+        kind: quota,
+        webSearch: useWebSearch,
+        unreadable: true,
+      });
+    }
+    // Grounding has its own (often tiny) daily quota. Map that to search_quota
+    // when search was on so the UI can suggest turning it off. Minute/token
+    // limits stay rate_limited either way.
+    const error = quota === "daily"
+      ? (useWebSearch ? "search_quota" : "quota_exhausted")
+      : "rate_limited";
+    res.setHeader("Retry-After", String(geminiRetryAfter(geminiRes, errJson)));
+    res.status(429).json({ error });
+    return;
+  }
+
+  if (!geminiRes.ok) {
+    await releaseClient(reservation);
+    let errJson = null;
+    try {
+      errJson = await geminiRes.json();
+    } catch {
+      errJson = null;
+    }
+    if (looksLikeCapacityError(errJson, geminiRes.status)) {
+      console.warn("[api/inference] provider capacity", {
+        http: geminiRes.status,
+        message: geminiErrorMessage(errJson)?.slice(0, 200),
+      });
+      res.status(503).json({ error: "provider_busy" });
+      return;
+    }
+    const providerStatus = errJson?.error?.status;
+    console.warn("[api/inference] provider error", {
+      http: geminiRes.status,
+      status: providerStatus,
+      message: geminiErrorMessage(errJson)?.slice(0, 200),
+    });
+    sendGeminiProviderFailure(res, geminiRes.status, errJson);
+    return;
+  }
+
+  let geminiJson;
+  try {
+    geminiJson = await geminiRes.json();
+  } catch {
+    await releaseClient(reservation);
+    res.status(502).json({ error: "provider_error" });
+    return;
+  }
+
+  const text = extractGeminiText(geminiJson);
+  if (!text) {
+    await releaseClient(reservation);
+    res.status(502).json({ error: "provider_error" });
+    return;
+  }
+
+  await commitClient(reservation);
+  res.status(200).json({
+    content: withSources(text, extractGroundingSources(geminiJson)),
+    model,
+  });
+}
+
+const REASONING_EFFORTS = new Set(["auto", "none", "low", "medium", "high"]);
+
+function parseWebSearch(value) {
+  if (value === undefined) return true;
+  if (typeof value === "boolean") return value;
+  if (value === 0) return false;
+  if (value === 1) return true;
+  if (typeof value === "string") {
+    const flag = value.trim().toLowerCase();
+    if (flag === "0" || flag === "false" || flag === "off") return false;
+    if (flag === "1" || flag === "true" || flag === "on") return true;
+  }
+  return null;
+}
+
+function parseInferenceOptions(raw) {
+  if (raw == null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const options = {};
+
+  if ("reasoningEffort" in raw && raw.reasoningEffort !== undefined) {
+    if (
+      typeof raw.reasoningEffort !== "string" ||
+      !REASONING_EFFORTS.has(raw.reasoningEffort)
+    ) {
+      return null;
+    }
+    options.reasoningEffort = raw.reasoningEffort;
+  }
+
+  if ("temperature" in raw && raw.temperature !== undefined) {
+    if (
+      typeof raw.temperature !== "number" ||
+      !Number.isFinite(raw.temperature) ||
+      raw.temperature < 0 ||
+      raw.temperature > 2
+    ) {
+      return null;
+    }
+    options.temperature = raw.temperature;
+  }
+
+  return options;
+}
+
+/** Map IPA `reasoningEffort` onto Gemini thinking knobs. Omit for auto/absent. */
+function thinkingConfigForEffort(model, effort) {
+  if (effort == null || effort === "auto") return undefined;
+  if (/\b2\.5\b/.test(model)) {
+    if (effort === "none") return { thinkingBudget: 0 };
+    if (effort === "low") return { thinkingBudget: 1024 };
+    if (effort === "medium") return { thinkingBudget: 8192 };
+    return { thinkingBudget: -1 };
+  }
+  if (/^gemma-/i.test(model)) {
+    return { thinkingLevel: effort === "none" ? "minimal" : "high" };
+  }
+  return { thinkingLevel: effort === "none" ? "minimal" : effort };
+}
+
+function retryAfterSeconds(value) {
+  if (value == null) return 60;
+  const raw = String(value).trim();
+  if (!raw) return 60;
+  const protoDelay = /^(\d+(?:\.\d+)?)s$/i.exec(raw);
+  if (protoDelay) return Math.max(1, Math.ceil(Number(protoDelay[1])));
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1, Math.ceil(seconds));
+  const date = Date.parse(raw);
+  return Number.isFinite(date) ? Math.max(1, Math.ceil((date - Date.now()) / 1000)) : 60;
+}
+
+function geminiRetryAfter(response, errJson) {
+  const header = typeof response.headers?.get === "function"
+    ? response.headers.get("retry-after")
+    : undefined;
+  if (header?.trim()) return retryAfterSeconds(header);
+  let delay;
+  walkObjects(errJson, (record) => {
+    if (delay || typeof record.retryDelay !== "string") return;
+    if (record.retryDelay.trim()) delay = record.retryDelay;
+  });
+  return retryAfterSeconds(delay);
+}
+
+function classifyGemini429(body) {
+  // RESOURCE_EXHAUSTED covers both short-window RPM/TPM limits and daily/plan
+  // quotas. Prefer explicit quota signals; default to rate (retry soon).
+  const haystack = `${collectStrings(body).join(" ")} ${collectQuotaIds(body).join(" ")}`;
+  if (
+    /PerMinute|per_minute|per minute|RequestsPerMinute|_rpm\b|TokensPerMinute|_tpm\b/i.test(
+      haystack
+    )
+  ) {
+    return "rate";
+  }
+  // Opaque "check billing" / "exceeded your current quota" is Gemini's usual
+  // daily/plan message when PerDay is absent (common for Search Grounding).
+  if (
+    /PerDay|per_day|per day|RequestsPerDay|_rpd\b|exceeded your current quota|billing details/i.test(
+      haystack
+    )
+  ) {
+    return "daily";
+  }
+  return "rate";
+}
+
+function collectQuotaIds(value) {
+  const ids = [];
+  walkObjects(value, (record) => {
+    if (typeof record.quotaId === "string" && record.quotaId.trim()) {
+      ids.push(record.quotaId);
+    }
+  });
+  return ids;
+}
+
+function collectStrings(value) {
+  const parts = [];
+  const visit = (node) => {
+    if (typeof node === "string") {
+      parts.push(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    if (node && typeof node === "object") {
+      for (const child of Object.values(node)) visit(child);
+    }
+  };
+  visit(value);
+  return parts;
+}
+
+function walkObjects(value, visit) {
+  if (Array.isArray(value)) {
+    for (const item of value) walkObjects(item, visit);
+    return;
+  }
+  if (value && typeof value === "object") {
+    visit(value);
+    for (const child of Object.values(value)) walkObjects(child, visit);
+  }
+}
+
+function geminiErrorMessage(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const error = value.error;
+  if (!error || typeof error !== "object") return undefined;
+  const message = error.message;
+  return typeof message === "string" ? message : undefined;
+}
+
+function extractGeminiText(data) {
+  if (!data || typeof data !== "object") return null;
+  const candidates = data.candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const content = candidates[0]?.content;
+  if (!content || typeof content !== "object") return null;
+  const parts = content.parts;
+  if (!Array.isArray(parts)) return null;
+  const chunks = [];
+  for (const part of parts) {
+    if (!part || typeof part !== "object") continue;
+    if (part.thought === true) continue;
+    if (typeof part.text === "string") chunks.push(part.text);
+  }
+  const joined = chunks.join("").trim();
+  return joined || null;
+}
+
+function extractGroundingSources(data) {
+  const chunks = data?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+  if (!Array.isArray(chunks)) return [];
+  const seen = new Set();
+  const sources = [];
+  for (const chunk of chunks) {
+    const web = chunk?.web;
+    const uri = typeof web?.uri === "string" ? web.uri.trim() : "";
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    const title =
+      typeof web.title === "string" && web.title.trim()
+        ? web.title.trim()
+        : uri;
+    sources.push({ title, uri });
+  }
+  return sources;
+}
+
+function withSources(text, sources) {
+  if (sources.length === 0) return text;
+  if (sources.every((source) => text.includes(source.uri))) return text;
+  const lines = sources.map((source) => `- [${source.title}](${source.uri})`);
+  return `${text}\n\nSources:\n${lines.join("\n")}`;
+}
