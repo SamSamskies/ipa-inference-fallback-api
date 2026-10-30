@@ -11,7 +11,8 @@
 
 import dns from "node:dns/promises";
 import { isIP } from "node:net";
-import { envInt, loadLocalEnvFallback, todayUtc } from "../lib/env.js";
+import { clientQuota } from "../lib/client-quota.js";
+import { envInt, loadLocalEnvFallback } from "../lib/env.js";
 import { completeOllama } from "../lib/ollama.js";
 import { completeReplit } from "../lib/replit.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
@@ -31,8 +32,6 @@ import {
 const MAX_BODY_BYTES = 100_000;
 const MAX_PROMPT_CHARS = 60_000;
 const DEFAULT_CLIENT_DAILY = 50;
-
-const clientBuckets = new Map();
 
 loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_"]);
 
@@ -61,22 +60,11 @@ function clientDailyLimit() {
 }
 
 function tryConsumeClient(key, limit) {
-  const day = todayUtc();
-  const cur = clientBuckets.get(key);
-  if (!cur || cur.day !== day) {
-    clientBuckets.set(key, { day, count: 1 });
-    return true;
-  }
-  if (cur.count >= limit) return false;
-  cur.count += 1;
-  return true;
+  return clientQuota.tryConsume(key, limit);
 }
 
 function releaseClient(key) {
-  const day = todayUtc();
-  const cur = clientBuckets.get(key);
-  if (!cur || cur.day !== day || cur.count <= 0) return;
-  cur.count -= 1;
+  clientQuota.release(key);
 }
 
 const IMAGE_MEDIA_TYPES = new Set([
