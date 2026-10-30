@@ -10,13 +10,42 @@ function held(result) {
 test("stale client buckets from a previous UTC day are dropped on consume", async () => {
   let day = "2026-01-01";
   const quota = createClientQuota({ today: () => day, maxBuckets: 10 });
-  held(await quota.tryConsume("alice", 50));
-  held(await quota.tryConsume("bob", 50));
+  const alice = held(await quota.tryConsume("alice", 50));
+  const bob = held(await quota.tryConsume("bob", 50));
+  await quota.commit(alice);
+  await quota.commit(bob);
   day = "2026-01-02";
   held(await quota.tryConsume("carol", 50));
   assert.equal(quota.buckets.has("alice"), false);
   assert.equal(quota.buckets.has("bob"), false);
   assert.deepEqual(quota.buckets.get("carol"), { day: "2026-01-02", count: 1 });
+});
+
+test("in-flight clients are not pruned across UTC rollover", async () => {
+  let day = "2026-01-01";
+  const quota = createClientQuota({ today: () => day, maxBuckets: 10 });
+  const alice = held(await quota.tryConsume("alice", 50));
+  day = "2026-01-02";
+  held(await quota.tryConsume("carol", 50));
+  assert.deepEqual(quota.buckets.get("alice"), { day: "2026-01-01", count: 1 });
+  await quota.commit(alice);
+  held(await quota.tryConsume("dave", 50));
+  assert.equal(quota.buckets.has("alice"), false);
+});
+
+test("same-client rollover keeps prior-day in-flight successes on that day's cap", async () => {
+  let day = "2026-01-01";
+  const quota = createClientQuota({ today: () => day });
+  const slots = [];
+  for (let i = 0; i < 5; i++) slots.push(held(await quota.tryConsume("alice", 5)));
+  assert.equal(await quota.tryConsume("alice", 5), "client_limit");
+  day = "2026-01-02";
+  held(await quota.tryConsume("alice", 5));
+  assert.deepEqual(quota.buckets.get("alice"), { day: "2026-01-02", count: 1 });
+  for (const slot of slots) await quota.commit(slot);
+  for (let i = 0; i < 4; i++) held(await quota.tryConsume("alice", 5));
+  assert.equal(await quota.tryConsume("alice", 5), "client_limit");
+  assert.deepEqual(quota.buckets.get("alice"), { day: "2026-01-02", count: 5 });
 });
 
 test("client buckets stay bounded when distinct ids keep arriving", async () => {
