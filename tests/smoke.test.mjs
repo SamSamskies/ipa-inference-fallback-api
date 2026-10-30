@@ -11,7 +11,7 @@ const script = fileURLToPath(new URL("../scripts/smoke.mjs", import.meta.url));
 function run(args, scenario = "success") {
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
@@ -56,6 +56,11 @@ function run(args, scenario = "success") {
           appendFileSync("requests.jsonl", JSON.stringify({provider:"gemini", model}) + "\\n");
           return Response.json({candidates:[{content:{parts:[{text:"smoke test OK"}]}}]});
         }
+        if (target.hostname === "samsamskies-inference.replit.app") {
+          const model = JSON.parse(init.body).model;
+          appendFileSync("requests.jsonl", JSON.stringify({provider:"replit", model}) + "\\n");
+          return Response.json({choices:[{message:{role:"assistant",content:"smoke test OK"}}]});
+        }
         const request = { url: String(url), method: init.method, headers: init.headers,
           body: init.body ? JSON.parse(init.body) : undefined };
         appendFileSync("requests.jsonl", JSON.stringify(request) + "\\n");
@@ -72,14 +77,14 @@ function run(args, scenario = "success") {
       };
     `);
     const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-      !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|NODE_OPTIONS)/.test(name)));
+      !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|REPLIT_|NODE_OPTIONS)/.test(name)));
     const result = spawnSync(process.execPath, ["--import", mockPath, script, ...args], {
       cwd: directory, env: { ...env, IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
     });
     assert.ifError(result.error);
     assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
     const output = result.stdout + result.stderr;
-    assert.doesNotMatch(output, /private-(?:gemini|ollama)-test-key/);
+    assert.doesNotMatch(output, /private-(?:gemini|ollama|replit)-test-key/);
     let requests = [];
     try {
       requests = readFileSync(join(directory, "requests.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
@@ -112,6 +117,7 @@ test("smoke model overrides reach the selected provider without changing the env
   for (const [args, provider, model] of [
     [["--provider", "ollama", "--model", "  custom:cloud  "], "ollama", "custom:cloud"],
     [["--provider", "gemini", "--model", "custom-gemini-model"], "gemini", "custom-gemini-model"],
+    [["--provider", "replit", "--model", "custom/replit-model"], "replit", "custom/replit-model"],
     [["--model", "default-provider-model"], "gemini", "default-provider-model"],
   ]) {
     const result = run(args);
@@ -122,7 +128,7 @@ test("smoke model overrides reach the selected provider without changing the env
 });
 
 test("local smoke without a model override uses the provider's configured model", () => {
-  for (const provider of ["ollama", "gemini"]) {
+  for (const provider of ["ollama", "gemini", "replit"]) {
     const result = run(["--provider", provider]);
     assert.equal(result.status, 0, result.output);
     assert.deepEqual(result.requests, [{provider, model:`configured-${provider}-model`}]);
@@ -130,7 +136,7 @@ test("local smoke without a model override uses the provider's configured model"
 });
 
 test("smoke selects each provider and sends the endpoint contract without credentials", () => {
-  for (const provider of ["ollama", "gemini"]) {
+  for (const provider of ["ollama", "gemini", "replit"]) {
     const result = run(["--provider", provider, "--url", "https://smoke.example/api/inference"]);
     assert.equal(result.status, 0, result.output);
     assert.match(result.output, /Smoke test passed/);
@@ -146,7 +152,7 @@ test("smoke selects each provider and sends the endpoint contract without creden
     assert.equal(post.body.webSearch, false);
     assert.equal(post.body.options.reasoningEffort, "none");
     assert.equal(post.body.messages[0].role, "user");
-    assert.doesNotMatch(JSON.stringify(result.requests), /private-(?:gemini|ollama)-test-key/);
+    assert.doesNotMatch(JSON.stringify(result.requests), /private-(?:gemini|ollama|replit)-test-key/);
   }
 });
 

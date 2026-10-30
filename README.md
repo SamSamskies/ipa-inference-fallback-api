@@ -6,7 +6,8 @@ an app can use this endpoint for hosted inference. The app handles provider
 detection and decides when to use the fallback.
 
 The endpoint runs as a standalone Node ESM `/api/inference` function.
-Callers can select Ollama Cloud or Gemini per request; Ollama Cloud is the default.
+Callers can select Ollama Cloud, Gemini, or the Replit gateway per request;
+Ollama Cloud is the default.
 There are no runtime package dependencies or frontend/build framework dependencies.
 
 The existing origin checks and client token are not app authentication. Existing
@@ -29,7 +30,7 @@ or development command. The script is named `dev:vercel` because Vercel rejects 
 `dev` script that recursively invokes itself. Secrets belong in `.env.local` or
 the Vercel environment; local env files are ignored by Git. The extracted env
 loader fills missing `DEFAULT_INFERENCE_PROVIDER`, `INFERENCE_`, `OLLAMA_`, and
-`GEMINI_` values from `.env.local` then `.env`, without overriding existing
+`GEMINI_` and `REPLIT_` values from `.env.local` then `.env`, without overriding existing
 nonempty environment values.
 
 `vercel.json` requests a [60 second function duration](https://vercel.com/docs/functions/configuring-functions/duration),
@@ -60,6 +61,7 @@ Add provider keys to `.env.local`, then run:
 ```sh
 npm run smoke -- --provider ollama
 npm run smoke -- --provider gemini
+npm run smoke -- --provider replit
 npm run smoke
 ```
 
@@ -73,6 +75,7 @@ Override the selected provider's model for a single run with `--model`:
 ```sh
 npm run smoke -- --provider ollama --model gemma4:cloud
 npm run smoke -- --provider gemini --model gemma-4-31b-it
+npm run smoke -- --provider replit --model google/gemma-4-26b-a4b-it
 ```
 
 The override applies only to the smoke-test process and leaves `.env.local`
@@ -100,7 +103,7 @@ default. Use `npm run smoke -- --help` for usage.
 
 | Variable | Default / behavior |
 | --- | --- |
-| `DEFAULT_INFERENCE_PROVIDER` | `ollama`; alternatively `gemini`; used when the request omits `provider` |
+| `DEFAULT_INFERENCE_PROVIDER` | `ollama`, `gemini`, or `replit`; defaults to `ollama`; used when the request omits `provider` |
 | `INFERENCE_FALLBACK_ENABLED` | Enabled when the selected provider has a key; `0`, `false`, or `off` disables it |
 | `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per client token per UTC day |
 | `OLLAMA_API_KEY` | Required for Ollama; Gemini keys are never sent to Ollama |
@@ -110,16 +113,18 @@ default. Use `npm run smoke -- --help` for usage.
 | `OLLAMA_MAX_CONCURRENT` | 2 active explanations |
 | `GEMINI_API_KEY` | Required for Gemini |
 | `GEMINI_MODEL` | `gemma-4-31b-it` |
+| `REPLIT_API_KEY` | The Replit gateway's bearer token; required for Replit |
+| `REPLIT_MODEL` | `google/gemma-4-26b-a4b-it` |
 
-Set `OLLAMA_MODEL` and `GEMINI_MODEL` to configure each provider's model. When
+Set `OLLAMA_MODEL`, `GEMINI_MODEL`, and `REPLIT_MODEL` to configure each provider's model. When
 unset, each provider uses its built-in default listed above.
 Numeric limits accept positive values, flooring them to integers; invalid values
 fall back to defaults.
 
 ## Request and response contract
 
-Select a provider with `POST /api/inference?provider=ollama` or
-`POST /api/inference?provider=gemini`. Omitting the parameter uses
+Select a provider with `POST /api/inference?provider=ollama`,
+`POST /api/inference?provider=gemini`, or `POST /api/inference?provider=replit`. Omitting the parameter uses
 `DEFAULT_INFERENCE_PROVIDER`. The same selection applies to `GET` probes.
 Unknown, empty, or repeated `provider` parameters return `400 invalid_provider`.
 The chosen provider must have a server-side API key and be enabled; otherwise
@@ -160,7 +165,16 @@ redirects are followed. Failed image downloads become text URLs.
 `webSearch` defaults to enabled unless explicitly `false`. Ollama calls
 `https://ollama.com/api` directly and may run up to two `web_search` tools and
 three chat calls. Gemini uses Google Search grounding and retries capacity errors
-once. Both append source links when needed. `reasoningEffort` accepts `auto`,
+once. Replit calls the fixed
+[`samsamskies-inference.replit.app` gateway](https://samsamskies-inference.replit.app)
+at `/v1/chat/completions` using `REPLIT_API_KEY`. With search enabled, it sends
+`tools: [{"type":"openrouter:web_search"}]` and leaves execution to the gateway,
+following [OpenRouter's hosted search format](https://openrouter.ai/docs/guides/features/server-tools/web-search).
+Returned `url_citation` annotations become source links. Replit uses OpenAI-compatible
+text/image messages and `reasoning_effort`; unsupported reasoning or temperature options get one retry without
+the rejected field, within the same deadline.
+
+All providers append source links when needed. `reasoningEffort` accepts `auto`,
 `none`, `low`, `medium`, and `high`; it maps to each provider's existing thinking
 settings. `temperature` accepts numbers from 0 through 2. Callers select only the
 provider through the query parameter; models, credentials, and provider base URLs
@@ -176,10 +190,11 @@ their existing JSON shape and codes:
 | 405 | `method_not_allowed` |
 | 413 | `payload_too_large` |
 | 429 | `client_limit`, `rate_limited`, `quota_exhausted`, `search_quota` |
-| 502 | `provider_error`, Ollama `model_unavailable`, Ollama `provider_auth` |
+| 502 | `provider_error`, Ollama/Replit `model_unavailable`, Ollama/Replit `provider_auth` |
 | 503 | `missing_api_key`, `disabled`, `invalid_provider` (configured default), `provider_busy` |
 
-Ollama rate limits/cooldowns retain `Retry-After`; Gemini quota classification
+Ollama rate limits/cooldowns and Replit gateway rate limits retain `Retry-After`;
+Replit maps insufficient-credit responses to `quota_exhausted`. Gemini quota classification
 distinguishes search, daily, and short-window limits. Provider failures release
 the daily success allowance, while Ollama attempt limits still count failures.
 

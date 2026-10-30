@@ -13,6 +13,8 @@ import dns from "node:dns/promises";
 import { isIP } from "node:net";
 import { envInt, loadLocalEnvFallback, todayUtc } from "../lib/env.js";
 import { completeOllama } from "../lib/ollama.js";
+import { completeReplit } from "../lib/replit.js";
+import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 import { ollamaLimiter } from "../lib/ollama-limits.js";
 import {
   applyCors,
@@ -25,7 +27,6 @@ import {
   pinnedFetch,
 } from "../lib/safeUrl.js";
 
-const DEFAULT_MODELS = { ollama: "gemma4:cloud", gemini: "gemma-4-31b-it" };
 const MAX_BODY_BYTES = 100_000;
 const MAX_PROMPT_CHARS = 60_000;
 const REQUEST_TIMEOUT_MS = 50_000;
@@ -33,20 +34,14 @@ const DEFAULT_CLIENT_DAILY = 50;
 
 const clientBuckets = new Map();
 
-loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_"]);
+loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_"]);
 
 function defaultProviderId() {
   return process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
 }
 
 function apiKey(provider) {
-  if (provider === "gemini") {
-    return process.env.GEMINI_API_KEY?.trim() || "";
-  }
-  if (provider === "ollama") {
-    return process.env.OLLAMA_API_KEY?.trim() || "";
-  }
-  return "";
+  return process.env[PROVIDER_CONFIG[provider].keyEnv]?.trim() || "";
 }
 
 function fallbackEnabled(provider) {
@@ -58,8 +53,7 @@ function fallbackEnabled(provider) {
 }
 
 function modelId(provider) {
-  return process.env[provider === "ollama" ? "OLLAMA_MODEL" : "GEMINI_MODEL"]?.trim() ||
-    DEFAULT_MODELS[provider];
+  return process.env[PROVIDER_CONFIG[provider].modelEnv]?.trim() || PROVIDER_CONFIG[provider].defaultModel;
 }
 
 function clientDailyLimit() {
@@ -463,7 +457,7 @@ export default async function handler(req, res) {
   const provider = explicitProvider
     ? requestedProviders[0].trim().toLowerCase()
     : defaultProviderId();
-  if (requestedProviders.length > 1 || !Object.hasOwn(DEFAULT_MODELS, provider)) {
+  if (requestedProviders.length > 1 || !Object.hasOwn(PROVIDER_CONFIG, provider)) {
     res.status(explicitProvider ? 400 : 503).json({ error: "invalid_provider" });
     return;
   }
@@ -551,18 +545,25 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (provider === "ollama") {
+  if (provider === "ollama" || provider === "replit") {
     let finish;
     const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     try {
-      finish = ollamaLimiter.begin(clientId);
+      if (provider === "ollama") finish = ollamaLimiter.begin(clientId);
       const resolvedPrompt = {
         ...prompt,
         contents: contentsHaveFileData(prompt.contents)
           ? await resolveImagesToInline(prompt.contents, signal)
           : prompt.contents,
       };
-      const result = await completeOllama({
+      if (provider === "replit") {
+        resolvedPrompt.contents = fallbackUnreadImages(resolvedPrompt.contents);
+        if (!contentsHaveInlineData(resolvedPrompt.contents)) {
+          resolvedPrompt.system = stripVisionSystemLine(resolvedPrompt.system);
+        }
+      }
+      const complete = provider === "ollama" ? completeOllama : completeReplit;
+      const result = await complete({
         prompt: resolvedPrompt,
         model: modelId(provider),
         key: apiKey(provider),

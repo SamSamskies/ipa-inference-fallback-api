@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import handler from "../api/inference.js";
+import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 
-const HELP = `Usage: npm run smoke -- [--provider ollama|gemini] [--model MODEL] [--url ENDPOINT]
+const HELP = `Usage: npm run smoke -- [--provider ${Object.keys(PROVIDER_CONFIG).join("|")}] [--model MODEL] [--url ENDPOINT]
 
 By default, start a temporary local server using keys from .env.local.
 Omit --provider to use DEFAULT_INFERENCE_PROVIDER (otherwise ollama).
@@ -46,7 +47,7 @@ async function request(url, init, provider, local) {
     const code = typeof body?.error === "string" && /^[a-z_]+$/.test(body.error)
       ? body.error : "unexpected_error";
     const hint = code === "missing_api_key" && local
-      ? ` Set ${provider.toUpperCase()}_API_KEY in .env.local.` : "";
+      ? ` Set ${PROVIDER_CONFIG[provider].keyEnv} in .env.local.` : "";
     const retryAfter = response.headers.get("retry-after");
     const retry = retryAfter && /^\d+$/.test(retryAfter) ? ` Retry after ${retryAfter}s.` : "";
     throw new Error(`${init.method} returned HTTP ${response.status}: ${code}.${hint}${retry}`);
@@ -72,15 +73,15 @@ async function main() {
     ? values.provider.trim().toLowerCase()
     : process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
   if ((values.provider !== undefined || values.url === undefined) &&
-    provider !== "ollama" && provider !== "gemini") {
-    throw new Error("Choose --provider ollama or --provider gemini.");
+    !Object.hasOwn(PROVIDER_CONFIG, provider)) {
+    throw new Error(`Choose --provider ${Object.keys(PROVIDER_CONFIG).join(", ")}.`);
   }
   if (values.model !== undefined) {
     if (!values.model.trim()) throw new Error("--model must be nonempty.");
     if (values.url !== undefined) {
       throw new Error("--model is only available for local smoke tests; --url uses the server's configured model.");
     }
-    process.env[provider === "ollama" ? "OLLAMA_MODEL" : "GEMINI_MODEL"] = values.model.trim();
+    process.env[PROVIDER_CONFIG[provider].modelEnv] = values.model.trim();
   }
 
   let server;
