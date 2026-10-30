@@ -369,6 +369,10 @@ async function fetchImageAsInlineData(fileUri, mimeType, signal) {
  * Leave fileData only when our fetch fails; provider paths then fall back to
  * a text URL (Gemini below, Ollama in toMessages).
  */
+function isAbortError(error, signal) {
+  return Boolean(signal?.aborted) || error?.name === "AbortError" || error?.name === "TimeoutError";
+}
+
 async function resolveImagesToInline(contents, signal) {
   const next = [];
   for (const content of contents) {
@@ -387,6 +391,7 @@ async function resolveImagesToInline(contents, signal) {
           )
         );
       } catch (error) {
+        if (isAbortError(error, signal)) throw error;
         console.warn("[api/inference] image fetch failed", {
           uri: String(part.fileData.fileUri).slice(0, 120),
           error: error instanceof Error ? error.message : "unknown",
@@ -646,7 +651,16 @@ export default async function handler(req, res) {
   // Hosted path: pull image bytes ourselves first. Relying on Gemini fileUri
   // fetch for Nostr CDNs often returns 503 / fetch failures.
   if (contentsHaveFileData(geminiBody.contents)) {
-    geminiBody.contents = await resolveImagesToInline(geminiBody.contents, requestSignal);
+    try {
+      geminiBody.contents = await resolveImagesToInline(geminiBody.contents, requestSignal);
+    } catch (error) {
+      releaseClient(clientId);
+      if (isAbortError(error, requestSignal)) {
+        res.status(503).json({ error: "provider_busy" });
+        return;
+      }
+      throw error;
+    }
   }
   geminiBody.contents = fallbackUnreadImages(geminiBody.contents);
   if (

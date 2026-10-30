@@ -228,6 +228,53 @@ test("hosted image redirects discard the previous body before the next hop", asy
   assert.equal(imageCalls[1].headers.Host, "cdn.example.test");
 });
 
+test("aborted image fetch returns provider_busy without contacting the provider", async () => {
+  process.env.INFERENCE_CLIENT_DAILY_LIMIT = "1";
+  const controller = new AbortController();
+  const originalTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = () => controller.signal;
+  mock.method(https, "request", () => {
+    const req = new EventEmitter();
+    req.end = () => {
+      controller.abort(new DOMException("Timed out", "TimeoutError"));
+      queueMicrotask(() => {
+        req.emit("error", Object.assign(new Error("aborted"), { name: "AbortError" }));
+      });
+    };
+    return req;
+  });
+  let providerCalls = 0;
+  globalThis.fetch = async () => {
+    providerCalls++;
+    return success();
+  };
+  const token = crypto.randomUUID();
+  try {
+    const response = await call({
+      token,
+      body: {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", url: "https://images.example.test/photo.png" },
+              { type: "text", text: "Describe this" },
+            ],
+          },
+        ],
+        webSearch: false,
+      },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "provider_busy");
+    assert.equal(providerCalls, 0);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ token })).statusCode, 200);
+});
+
 test("hosted image input becomes inline bytes and web search can be disabled", async () => {
   const imageCalls = mockPinnedHttpsImage(new Uint8Array([1, 2, 3]));
   const calls = [];
