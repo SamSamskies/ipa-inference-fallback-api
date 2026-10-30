@@ -579,6 +579,8 @@ test("Gemini quota classification distinguishes search, daily and minute limits"
   const token = crypto.randomUUID();
   for (const [webSearch, detail, expected] of [
     [true, { quotaId: "RequestsPerDay" }, "search_quota"],
+    [true, { quotaId: "RequestsPerMinute" }, "rate_limited"],
+    [true, {}, "rate_limited"],
     [false, { quotaId: "RequestsPerDay" }, "quota_exhausted"],
     [false, { message: "exceeded your current quota; check billing details" }, "quota_exhausted"],
     [false, { quotaId: "RequestsPerMinute", message: "check billing details" }, "rate_limited"],

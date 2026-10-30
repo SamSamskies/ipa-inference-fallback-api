@@ -788,13 +788,12 @@ export default async function handler(req, res) {
         unreadable: true,
       });
     }
-    // Grounding has its own (often tiny) quota. When search was on, tell the
-    // client so the UI can suggest turning it off vs a generic rate limit.
-    const error = useWebSearch
-      ? "search_quota"
-      : quota === "daily"
-        ? "quota_exhausted"
-        : "rate_limited";
+    // Grounding has its own (often tiny) daily quota. Map that to search_quota
+    // when search was on so the UI can suggest turning it off. Minute/token
+    // limits stay rate_limited either way.
+    const error = quota === "daily"
+      ? (useWebSearch ? "search_quota" : "quota_exhausted")
+      : "rate_limited";
     res.setHeader("Retry-After", String(geminiRetryAfter(geminiRes, errJson)));
     res.status(429).json({ error });
     return;
