@@ -65,7 +65,7 @@ function tryConsumeClient(key, limit) {
 }
 
 function releaseClient(key) {
-  clientQuota.release(key);
+  return clientQuota.release(key);
 }
 
 const IMAGE_MEDIA_TYPES = new Set([
@@ -602,7 +602,7 @@ export default async function handler(req, res) {
         model: result.model,
       });
     } catch (error) {
-      releaseClient(clientId);
+      await releaseClient(clientId);
       if (error?.retryAfter) res.setHeader("Retry-After", String(error.retryAfter));
       const status = signal.aborted ? 503 : error?.status || 502;
       res.status(status).json({
@@ -654,7 +654,7 @@ export default async function handler(req, res) {
     try {
       geminiBody.contents = await resolveImagesToInline(geminiBody.contents, requestSignal);
     } catch (error) {
-      releaseClient(clientId);
+      await releaseClient(clientId);
       if (isAbortError(error, requestSignal)) {
         res.status(503).json({ error: "provider_busy" });
         return;
@@ -690,7 +690,7 @@ export default async function handler(req, res) {
   try {
     geminiRes = await postGemini(geminiBody);
   } catch {
-    releaseClient(clientId);
+    await releaseClient(clientId);
     if (requestSignal.aborted) {
       res.status(503).json({ error: "provider_busy" });
       return;
@@ -722,13 +722,13 @@ export default async function handler(req, res) {
         await scheduler.wait(800, { signal: requestSignal });
         geminiRes = await postGemini(geminiBody);
       } catch {
-        releaseClient(clientId);
+        await releaseClient(clientId);
         res.status(503).json({ error: "provider_busy" });
         return;
       }
       // Fall through to normal status handling with the retry response.
     } else {
-      releaseClient(clientId);
+      await releaseClient(clientId);
       const providerStatus = errJson?.error?.status;
       console.warn("[api/inference] provider error", {
         http: geminiRes.status,
@@ -741,7 +741,7 @@ export default async function handler(req, res) {
   }
 
   if (geminiRes.status === 429) {
-    releaseClient(clientId);
+    await releaseClient(clientId);
     let quota = "rate";
     try {
       const errJson = await geminiRes.json();
@@ -771,7 +771,7 @@ export default async function handler(req, res) {
   }
 
   if (!geminiRes.ok) {
-    releaseClient(clientId);
+    await releaseClient(clientId);
     let errJson = null;
     try {
       errJson = await geminiRes.json();
@@ -800,14 +800,14 @@ export default async function handler(req, res) {
   try {
     geminiJson = await geminiRes.json();
   } catch {
-    releaseClient(clientId);
+    await releaseClient(clientId);
     res.status(502).json({ error: "provider_error" });
     return;
   }
 
   const text = extractGeminiText(geminiJson);
   if (!text) {
-    releaseClient(clientId);
+    await releaseClient(clientId);
     res.status(502).json({ error: "provider_error" });
     return;
   }
