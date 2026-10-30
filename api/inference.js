@@ -560,8 +560,9 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!tryConsumeClient(clientId, clientDailyLimit())) {
-    res.status(429).json({ error: "client_limit" });
+  const consume = tryConsumeClient(clientId, clientDailyLimit());
+  if (consume !== true) {
+    res.status(429).json({ error: consume });
     return;
   }
 

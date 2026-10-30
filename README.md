@@ -201,7 +201,7 @@ their existing JSON shape and codes:
 | 403 | `forbidden_origin` |
 | 405 | `method_not_allowed` |
 | 413 | `payload_too_large` |
-| 429 | `client_limit`, `rate_limited`, `quota_exhausted`, `search_quota` |
+| 429 | `client_limit`, `client_capacity`, `rate_limited`, `quota_exhausted`, `search_quota` |
 | 502 | `provider_error`, Ollama/Replit `model_unavailable`, Ollama/Replit `provider_auth` |
 | 503 | `missing_api_key`, `disabled`, `invalid_provider` (configured default), `provider_busy` |
 

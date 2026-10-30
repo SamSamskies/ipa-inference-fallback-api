@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler, { imageFetchDns } from "../api/inference.js";
+import { clientQuota } from "../lib/client-quota.js";
 
 // Client-supplied fixtures; application prompt builders stay in the frontends.
 const SYSTEM_PROMPT_IMAGES_LINE =
@@ -303,6 +304,13 @@ test("hosted image fetch does not request hostnames that resolve to private addr
   assert.equal(calls.length, 1);
   assert.equal(imageRequests.mock.callCount(), 0);
   assert.match(calls[0], /^https:\/\/generativelanguage\.googleapis\.com\//);
+});
+
+test("instance client bucket exhaustion is distinct from the daily client limit", async () => {
+  mock.method(clientQuota, "tryConsume", () => "client_capacity");
+  const response = await call();
+  assert.equal(response.statusCode, 429);
+  assert.equal(response.body.error, "client_capacity");
 });
 
 test("successful requests consume the browser allowance", async () => {
