@@ -6,7 +6,7 @@ an app can use this endpoint for hosted inference. The app handles provider
 detection and decides when to use the fallback.
 
 The endpoint runs as a standalone Node ESM `/api/inference` function.
-Ollama Cloud is the default; Gemini is selectable through server configuration.
+Callers can select Ollama Cloud or Gemini per request; Ollama Cloud is the default.
 There are no runtime package dependencies or frontend/build framework dependencies.
 
 The existing origin checks and client token are not app authentication. Existing
@@ -19,7 +19,7 @@ Requires Node.js 22+ and npm. Vercel CLI is pinned as a development dependency.
 ```sh
 npm ci
 cp .env.example .env.local
-# Set OLLAMA_API_KEY, or choose Gemini and set GEMINI_API_KEY.
+# Set the API key for each provider callers should be able to use.
 npm run dev:vercel
 ```
 
@@ -28,8 +28,9 @@ a development project. Use the **Other** framework preset with no frontend build
 or development command. The script is named `dev:vercel` because Vercel rejects a
 `dev` script that recursively invokes itself. Secrets belong in `.env.local` or
 the Vercel environment; local env files are ignored by Git. The extracted env
-loader fills missing `INFERENCE_`, `OLLAMA_`, and `GEMINI_` values from `.env.local`
-then `.env`, without overriding existing nonempty environment values.
+loader fills missing `DEFAULT_INFERENCE_PROVIDER`, `INFERENCE_`, `OLLAMA_`, and
+`GEMINI_` values from `.env.local` then `.env`, without overriding existing
+nonempty environment values.
 
 `vercel.json` requests a [60 second function duration](https://vercel.com/docs/functions/configuring-functions/duration),
 where supported by the Vercel plan/runtime. Each inference attempt shares a
@@ -38,7 +39,7 @@ There is no frontend at `/`; use `/api/inference`.
 
 ```sh
 curl -i http://localhost:3000/api/inference
-curl -i http://localhost:3000/api/inference \
+curl -i 'http://localhost:3000/api/inference?provider=ollama' \
   -H 'Origin: http://localhost:3000' \
   -H 'Content-Type: application/json' \
   -H 'X-Inference-Client: local-example-client' \
@@ -47,14 +48,16 @@ curl -i http://localhost:3000/api/inference \
 
 The probe returns `200 {"ok":true}` when the selected provider is configured and
 enabled, or `503 {"ok":false,"error":"missing_api_key"}` / `"disabled"`. It checks
-configuration only and does not contact the provider. An unsupported configured
-provider returns `503 {"error":"invalid_provider"}`.
+configuration only and does not contact the provider. Use
+`GET /api/inference?provider=gemini` to probe a specific provider. An unsupported
+configured default returns `503 {"error":"invalid_provider"}`; an invalid caller
+selection returns `400 {"error":"invalid_provider"}`.
 
 ## Configuration
 
 | Variable | Default / behavior |
 | --- | --- |
-| `INFERENCE_PROVIDER` | `ollama`; alternatively `gemini` |
+| `DEFAULT_INFERENCE_PROVIDER` | `ollama`; alternatively `gemini`; used when the request omits `provider` |
 | `INFERENCE_FALLBACK_ENABLED` | Enabled when the selected provider has a key; `0`, `false`, or `off` disables it |
 | `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per client token per UTC day |
 | `OLLAMA_API_KEY` | Required for Ollama; Gemini keys are never sent to Ollama |
@@ -65,15 +68,25 @@ provider returns `503 {"error":"invalid_provider"}`.
 | `GEMINI_API_KEY` | Required for Gemini unless legacy `INFERENCE_API_KEY` is set |
 | `GEMINI_MODEL` | `gemma-4-31b-it` |
 
-Provider-specific model variables take precedence over `INFERENCE_MODEL`, which
-is considered only when `INFERENCE_PROVIDER` is explicitly nonempty. Set
-`OLLAMA_MODEL` to configure the Ollama model. Legacy Gemini aliases `INFERENCE_API_KEY`,
+Provider-specific model variables take precedence over `INFERENCE_MODEL`. This
+generic model fallback applies only to the default provider, and only when
+`DEFAULT_INFERENCE_PROVIDER` is explicitly nonempty. Other providers use their
+own model setting or built-in default. Set `OLLAMA_MODEL` and `GEMINI_MODEL` to
+configure each provider's model. Legacy Gemini aliases `INFERENCE_API_KEY`,
 `GEMINI_FALLBACK_ENABLED`, and `GEMINI_CLIENT_DAILY_LIMIT` remain fallbacks for
 their corresponding settings. A generic setting takes precedence when present.
 Numeric limits accept positive values, flooring them to integers; invalid values
 fall back to defaults.
 
 ## Request and response contract
+
+Select a provider with `POST /api/inference?provider=ollama` or
+`POST /api/inference?provider=gemini`. Omitting the parameter uses
+`DEFAULT_INFERENCE_PROVIDER`. The same selection applies to `GET` probes.
+Unknown, empty, or repeated `provider` parameters return `400 invalid_provider`.
+The chosen provider must have a server-side API key and be enabled; otherwise
+the request returns `503 missing_api_key` or `503 disabled`. Requests do not
+automatically switch providers on failure.
 
 `POST /api/inference` requires an allowed `Origin` and a nonempty
 `X-Inference-Client` header. Allowed origins are localhost/127.0.0.1, the request
@@ -111,21 +124,22 @@ redirects are followed. Failed image downloads become text URLs.
 three chat calls. Gemini uses Google Search grounding and retries capacity errors
 once. Both append source links when needed. `reasoningEffort` accepts `auto`,
 `none`, `low`, `medium`, and `high`; it maps to each provider's existing thinking
-settings. `temperature` accepts numbers from 0 through 2. Provider/model/key/base
-URL selection belongs to server configuration, not request fields.
+settings. `temperature` accepts numbers from 0 through 2. Callers select only the
+provider through the query parameter; models, credentials, and provider base URLs
+remain under server control.
 
 Successful requests return `200 {"content":"...","model":"..."}`. Errors retain
 their existing JSON shape and codes:
 
 | HTTP status | Error codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_request`, `missing_client_token`, Gemini `provider_error` (with upstream `http` and optional `providerStatus`) |
+| 400 | `invalid_provider` (caller selection), `invalid_json`, `invalid_request`, `missing_client_token`, Gemini `provider_error` (with upstream `http` and optional `providerStatus`) |
 | 403 | `forbidden_origin` |
 | 405 | `method_not_allowed` |
 | 413 | `payload_too_large` |
 | 429 | `client_limit`, `rate_limited`, `quota_exhausted`, `search_quota` |
 | 502 | `provider_error`, Ollama `model_unavailable`, Ollama `provider_auth` |
-| 503 | `missing_api_key`, `disabled`, `invalid_provider`, `provider_busy` |
+| 503 | `missing_api_key`, `disabled`, `invalid_provider` (configured default), `provider_busy` |
 
 Ollama rate limits/cooldowns retain `Retry-After`; Gemini quota classification
 distinguishes search, daily, and short-window limits. Provider failures release
@@ -147,5 +161,6 @@ Tests use Node's built-in runner with mocked providers, image transport, and DNS
 they need no credentials or network access. They cover validation, probes/CORS,
 timeouts, limits and `Retry-After`, bounded search, images/SSRF/redirects, reasoning,
 language instruction forwarding, Gemini capacity/quota handling, malformed
-provider replies, and provider/model/auth failures. Live provider generation is
-a separate, credentialed check.
+provider replies, provider/model/auth failures, and default/explicit provider
+selection with credential/model isolation. Live provider generation is a separate,
+credentialed check.

@@ -2,7 +2,7 @@
  * Hosted inference fallback. The public contract is generic so the provider
  * behind this file can change without renaming `/api/inference`.
  *
- * Default: Ollama Cloud. Gemini remains selectable with INFERENCE_PROVIDER.
+ * Default: Ollama Cloud. Callers can select a provider with ?provider=.
  * The key stays server-side. Local: `npx vercel dev` (loads `.env.local`).
  *
  * Extracted as Node ESM from the frontend apps; prompts and consent belong
@@ -33,46 +33,46 @@ const DEFAULT_CLIENT_DAILY = 50;
 
 const clientBuckets = new Map();
 
-loadLocalEnvFallback(["INFERENCE_", "GEMINI_", "OLLAMA_"]);
+loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_"]);
 
-function providerId() {
-  return process.env.INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
+function defaultProviderId() {
+  return process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
 }
 
-function apiKey() {
-  if (providerId() === "gemini") {
+function apiKey(provider) {
+  if (provider === "gemini") {
     return process.env.GEMINI_API_KEY?.trim() || process.env.INFERENCE_API_KEY?.trim() || "";
   }
-  if (providerId() === "ollama") {
+  if (provider === "ollama") {
     // INFERENCE_API_KEY is a legacy Gemini key; never send it to Ollama.
     return process.env.OLLAMA_API_KEY?.trim() || "";
   }
   return "";
 }
 
-function fallbackEnabled() {
+function fallbackEnabled(provider) {
   const flag = (
     process.env.INFERENCE_FALLBACK_ENABLED ??
-    (providerId() === "gemini" ? process.env.GEMINI_FALLBACK_ENABLED : undefined) ??
+    (provider === "gemini" ? process.env.GEMINI_FALLBACK_ENABLED : undefined) ??
     ""
   )
     .trim()
     .toLowerCase();
   if (flag === "0" || flag === "false" || flag === "off") return false;
-  return Boolean(apiKey());
+  return Boolean(apiKey(provider));
 }
 
-function modelId() {
-  const provider = providerId();
+function modelId(provider) {
   return process.env[provider === "ollama" ? "OLLAMA_MODEL" : "GEMINI_MODEL"]?.trim() ||
-    (process.env.INFERENCE_PROVIDER?.trim() ? process.env.INFERENCE_MODEL?.trim() : "") ||
+    (provider === defaultProviderId() && process.env.DEFAULT_INFERENCE_PROVIDER?.trim()
+      ? process.env.INFERENCE_MODEL?.trim() : "") ||
     DEFAULT_MODELS[provider];
 }
 
-function clientDailyLimit() {
+function clientDailyLimit(provider) {
   return envInt(
     "INFERENCE_CLIENT_DAILY_LIMIT",
-    providerId() === "gemini" ? envInt("GEMINI_CLIENT_DAILY_LIMIT", DEFAULT_CLIENT_DAILY) : DEFAULT_CLIENT_DAILY
+    provider === "gemini" ? envInt("GEMINI_CLIENT_DAILY_LIMIT", DEFAULT_CLIENT_DAILY) : DEFAULT_CLIENT_DAILY
   );
 }
 
@@ -466,19 +466,26 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!Object.hasOwn(DEFAULT_MODELS, providerId())) {
-    res.status(503).json({ error: "invalid_provider" });
+  const requestedProviders = new URL(
+    req.url || "/api/inference", "http://localhost"
+  ).searchParams.getAll("provider");
+  const explicitProvider = requestedProviders.length > 0;
+  const provider = explicitProvider
+    ? requestedProviders[0].trim().toLowerCase()
+    : defaultProviderId();
+  if (requestedProviders.length > 1 || !Object.hasOwn(DEFAULT_MODELS, provider)) {
+    res.status(explicitProvider ? 400 : 503).json({ error: "invalid_provider" });
     return;
   }
 
   if (req.method === "GET") {
-    if (fallbackEnabled()) {
+    if (fallbackEnabled(provider)) {
       res.status(200).json({ ok: true });
       return;
     }
     res.status(503).json({
       ok: false,
-      error: apiKey() ? "disabled" : "missing_api_key",
+      error: apiKey(provider) ? "disabled" : "missing_api_key",
     });
     return;
   }
@@ -488,9 +495,9 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!fallbackEnabled()) {
+  if (!fallbackEnabled(provider)) {
     res.status(503).json({
-      error: apiKey() ? "disabled" : "missing_api_key",
+      error: apiKey(provider) ? "disabled" : "missing_api_key",
     });
     return;
   }
@@ -549,12 +556,12 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (!tryConsumeClient(clientId, clientDailyLimit())) {
+  if (!tryConsumeClient(clientId, clientDailyLimit(provider))) {
     res.status(429).json({ error: "client_limit" });
     return;
   }
 
-  if (providerId() === "ollama") {
+  if (provider === "ollama") {
     let finish;
     const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     try {
@@ -567,8 +574,8 @@ export default async function handler(req, res) {
       };
       const result = await completeOllama({
         prompt: resolvedPrompt,
-        model: modelId(),
-        key: apiKey(),
+        model: modelId(provider),
+        key: apiKey(provider),
         options,
         webSearch: body.webSearch !== false,
         signal,
@@ -590,8 +597,8 @@ export default async function handler(req, res) {
     return;
   }
 
-  const key = apiKey();
-  const model = modelId();
+  const key = apiKey(provider);
+  const model = modelId(provider);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
 
   const generationConfig = {};

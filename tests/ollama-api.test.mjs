@@ -12,9 +12,9 @@ const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
 const originalNow = Date.now;
 const envNames = [
-  "INFERENCE_PROVIDER", "INFERENCE_API_KEY", "INFERENCE_MODEL",
+  "DEFAULT_INFERENCE_PROVIDER", "INFERENCE_API_KEY", "INFERENCE_MODEL",
   "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
-  "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_FALLBACK_ENABLED",
+  "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_FALLBACK_ENABLED", "GEMINI_CLIENT_DAILY_LIMIT",
   "OLLAMA_API_KEY", "OLLAMA_MODEL", "OLLAMA_REQUESTS_PER_MINUTE",
   "OLLAMA_CLIENT_REQUESTS_PER_MINUTE", "OLLAMA_MAX_CONCURRENT",
 ];
@@ -68,7 +68,7 @@ const messages = [
 function success(content = "An open protocol.") {
   return Response.json({ message: { role: "assistant", content }, done: true });
 }
-async function call({ method = "POST", token = crypto.randomUUID(), body = { messages, webSearch: false } } = {}) {
+async function call({ method = "POST", token = crypto.randomUUID(), body = { messages, webSearch: false }, url = "/api/inference" } = {}) {
   const res = {
     statusCode: 200, headers: {}, body: null,
     setHeader(name, value) { this.headers[name] = value; },
@@ -76,7 +76,7 @@ async function call({ method = "POST", token = crypto.randomUUID(), body = { mes
     json(value) { this.body = value; return this; },
     end() { return this; },
   };
-  await handler({ method, headers: { host: "example.test", origin: "https://example.test", "x-inference-client": token }, body }, res);
+  await handler({ method, url, headers: { host: "example.test", origin: "https://example.test", "x-inference-client": token }, body }, res);
   return res;
 }
 
@@ -110,7 +110,7 @@ test("Ollama never reuses Gemini credentials, even with an explicit selector", a
   process.env.INFERENCE_API_KEY = "legacy-gemini-key";
   process.env.GEMINI_API_KEY = "gemini-key";
   for (const provider of [undefined, "ollama"]) {
-    if (provider) process.env.INFERENCE_PROVIDER = provider;
+    if (provider) process.env.DEFAULT_INFERENCE_PROVIDER = provider;
     const response = await call({ method: "GET" });
     assert.equal(response.statusCode, 503);
     assert.equal(response.body.error, "missing_api_key");
@@ -118,15 +118,15 @@ test("Ollama never reuses Gemini credentials, even with an explicit selector", a
 });
 
 test("provider selection rejects typos and honors the disable flag", async () => {
-  process.env.INFERENCE_PROVIDER = "olllama";
+  process.env.DEFAULT_INFERENCE_PROVIDER = "olllama";
   assert.equal((await call()).body.error, "invalid_provider");
-  process.env.INFERENCE_PROVIDER = "ollama";
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
   process.env.INFERENCE_FALLBACK_ENABLED = "false";
   assert.equal((await call()).body.error, "disabled");
 });
 
 test("provider-specific model takes precedence and ordinary model tags pass through", async () => {
-  process.env.INFERENCE_PROVIDER = "ollama";
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
   process.env.INFERENCE_MODEL = "generic-model";
   process.env.OLLAMA_MODEL = "custom:cloud";
   globalThis.fetch = async (_url, options) => {
@@ -140,6 +140,133 @@ test("provider-specific model takes precedence and ordinary model tags pass thro
     return success();
   };
   assert.equal((await call()).statusCode, 200);
+});
+
+test("requests use the configured default and can explicitly select either provider", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_MODEL = "gemini-test-model";
+  const paths = [];
+  globalThis.fetch = async (url, init) => {
+    paths.push(String(url));
+    if (String(url).startsWith("https://generativelanguage.googleapis.com/")) {
+      assert.match(url, /models\/gemini-test-model:generateContent\?key=test-gemini-key$/);
+      return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+    }
+    assert.equal(url, "https://ollama.com/api/chat");
+    assert.equal(init.headers.Authorization, "Bearer test-ollama-key");
+    return success("Ollama answer");
+  };
+  assert.deepEqual((await call()).body, { content: "Gemini answer", model: "gemini-test-model" });
+  assert.deepEqual((await call({ url: "/api/inference?provider=ollama" })).body,
+    { content: "Ollama answer", model: "gemma4:31b" });
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  assert.deepEqual((await call({ url: "/api/inference?provider=gemini" })).body,
+    { content: "Gemini answer", model: "gemini-test-model" });
+  assert.equal(paths.length, 3);
+});
+
+test("provider-specific probes and POSTs require that provider's credentials", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  for (const method of ["GET", "POST"]) {
+    const response = await call({ method, url: "/api/inference?provider=gemini" });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "missing_api_key");
+  }
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  assert.deepEqual((await call({ method: "GET", url: "/api/inference?provider=gemini" })).body, { ok: true });
+  delete process.env.OLLAMA_API_KEY;
+  for (const method of ["GET", "POST"]) {
+    const response = await call({ method, url: "/api/inference?provider=ollama" });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.error, "missing_api_key");
+  }
+});
+
+test("unknown, empty and repeated provider parameters fail without contacting providers", async () => {
+  for (const query of ["provider=unknown", "provider=", "provider=%20", "provider=__proto__",
+    "provider=ollama&provider=gemini", "provider=ollama&provider=ollama"]) {
+    for (const method of ["GET", "POST"]) {
+      const response = await call({ method, url: `/api/inference?${query}` });
+      assert.equal(response.statusCode, 400);
+      assert.deepEqual(response.body, { error: "invalid_provider" });
+    }
+  }
+  process.env.DEFAULT_INFERENCE_PROVIDER = "typo";
+  assert.equal((await call({ method: "GET" })).statusCode, 503);
+  // An explicit valid choice does not depend on the default being valid.
+  assert.equal((await call({ method: "GET", url: "/api/inference?provider=%20OLLAMA%20" })).statusCode, 200);
+});
+
+test("provider selection respects the global and Gemini-specific disable flags", async () => {
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_FALLBACK_ENABLED = "false";
+  assert.equal((await call({ method: "GET", url: "/api/inference?provider=ollama" })).statusCode, 200);
+  assert.equal((await call({ method: "GET", url: "/api/inference?provider=gemini" })).body.error, "disabled");
+  process.env.INFERENCE_FALLBACK_ENABLED = "false";
+  for (const provider of ["ollama", "gemini"]) {
+    assert.equal((await call({ url: `/api/inference?provider=${provider}` })).body.error, "disabled");
+  }
+});
+
+test("generic model configuration applies only to the default provider", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.INFERENCE_MODEL = "gemini-default-model";
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://generativelanguage.googleapis.com/")) {
+      assert.match(url, /models\/gemini-default-model:generateContent/);
+      return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+    }
+    assert.equal(JSON.parse(init.body).model, "gemma4:31b");
+    return success();
+  };
+  assert.equal((await call()).statusCode, 200);
+  assert.equal((await call({ url: "/api/inference?provider=ollama" })).statusCode, 200);
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
+  process.env.INFERENCE_MODEL = "ollama-default-model";
+  globalThis.fetch = async (url) => {
+    assert.match(url, /models\/gemma-4-31b-it:generateContent/);
+    return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+  };
+  assert.equal((await call({ url: "/api/inference?provider=gemini" })).statusCode, 200);
+});
+
+test("concurrent provider selections keep their credentials and models separate", async () => {
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_MODEL = "gemini-test-model";
+  process.env.OLLAMA_MODEL = "ollama-test-model";
+  globalThis.fetch = async (url, init) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (url === "https://ollama.com/api/chat") {
+      assert.equal(init.headers.Authorization, "Bearer test-ollama-key");
+      assert.equal(JSON.parse(init.body).model, "ollama-test-model");
+      return success("Ollama answer");
+    }
+    assert.match(url, /models\/gemini-test-model:generateContent\?key=test-gemini-key$/);
+    assert.equal(init.headers.Authorization, undefined);
+    return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+  };
+  const [ollama, gemini] = await Promise.all([
+    call({ url: "/api/inference?provider=ollama" }), call({ url: "/api/inference?provider=gemini" }),
+  ]);
+  assert.equal(ollama.statusCode, 200);
+  assert.deepEqual(ollama.body, { content: "Ollama answer", model: "ollama-test-model" });
+  assert.equal(gemini.statusCode, 200);
+  assert.deepEqual(gemini.body, { content: "Gemini answer", model: "gemini-test-model" });
+  assert.equal(process.env.DEFAULT_INFERENCE_PROVIDER, "gemini");
+});
+
+test("the selected provider determines the legacy daily limit", async () => {
+  delete process.env.INFERENCE_CLIENT_DAILY_LIMIT;
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.GEMINI_CLIENT_DAILY_LIMIT = "1";
+  globalThis.fetch = async () => Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
+  const token = crypto.randomUUID();
+  const request = { token, url: "/api/inference?provider=gemini" };
+  assert.equal((await call(request)).statusCode, 200);
+  assert.equal((await call(request)).body.error, "client_limit");
 });
 
 test("model and credential failures remain distinct from provider overload", async () => {

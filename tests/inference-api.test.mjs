@@ -11,7 +11,7 @@ const SYSTEM_PROMPT_IMAGES_LINE =
 const originalFetch = globalThis.fetch;
 const originalLookupAll = imageFetchDns.lookupAll;
 const envNames = [
-  "INFERENCE_PROVIDER",
+  "DEFAULT_INFERENCE_PROVIDER",
   "INFERENCE_API_KEY",
   "GEMINI_API_KEY",
   "INFERENCE_FALLBACK_ENABLED",
@@ -28,7 +28,7 @@ beforeEach(() => {
   );
   envNames.forEach((key) => delete process.env[key]);
   process.env.INFERENCE_API_KEY = "test-key-not-a-credential";
-  process.env.INFERENCE_PROVIDER = "gemini";
+  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
   process.env.INFERENCE_MODEL = "test-model";
   process.env.INFERENCE_FALLBACK_ENABLED = "true";
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "50";
@@ -78,9 +78,11 @@ async function call({
   token = crypto.randomUUID(),
   body = { messages, webSearch: false },
   headers = {},
+  url = "/api/inference",
 } = {}) {
   const req = {
     method,
+    url,
     headers: { host: "example.test", origin, "x-inference-client": token, ...headers },
     body,
   };
