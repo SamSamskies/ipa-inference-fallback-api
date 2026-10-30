@@ -1,8 +1,11 @@
 # IPA inference fallback API
 
-Standalone Node ESM `/api/inference` function for the hosted fallback used by
-[TrendingNostr](https://github.com/SamSamskies/trendingnostr) and
-[AdvancedNostrSearch](https://github.com/SamSamskies/advancednostrsearch).
+A fallback inference endpoint for apps using the Inference Provider API (IPA).
+When no Inference Provider API is detected, an app can use this endpoint for
+hosted inference. The app handles provider detection and decides when to use
+the fallback.
+
+The endpoint runs as a standalone Node ESM `/api/inference` function.
 Ollama Cloud is the default; Gemini is selectable through server configuration.
 There are no runtime package dependencies or frontend/build framework dependencies.
 
@@ -42,7 +45,7 @@ curl -i http://localhost:3000/api/inference \
   -H 'Origin: http://localhost:3000' \
   -H 'Content-Type: application/json' \
   -H 'X-Inference-Client: local-example-client' \
-  --data '{"messages":[{"role":"user","content":"Explain Nostr in one sentence."}],"webSearch":false,"options":{"reasoningEffort":"none","temperature":0.3}}'
+  --data '{"messages":[{"role":"user","content":"Explain DNS in one sentence."}],"webSearch":false,"options":{"reasoningEffort":"none","temperature":0.3}}'
 ```
 
 The probe returns `200 {"ok":true}` when the selected provider is configured and
@@ -66,10 +69,9 @@ provider returns `503 {"error":"invalid_provider"}`.
 | `GEMINI_MODEL` | `gemma-4-31b-it` |
 
 Provider-specific model variables take precedence over `INFERENCE_MODEL`, which
-is considered only when `INFERENCE_PROVIDER` is explicitly nonempty. This port
-uses TrendingNostr's `OLLAMA_INFERENCE_MODEL`; AdvancedNostrSearch's former
-`OLLAMA_MODEL` must be renamed when configuring this service. `OLLAMA_MODEL` is
-not read here. Legacy Gemini aliases `INFERENCE_API_KEY`,
+is considered only when `INFERENCE_PROVIDER` is explicitly nonempty. Set
+`OLLAMA_INFERENCE_MODEL` to configure the Ollama model; `OLLAMA_MODEL` is not
+read here. Legacy Gemini aliases `INFERENCE_API_KEY`,
 `GEMINI_FALLBACK_ENABLED`, and `GEMINI_CLIENT_DAILY_LIMIT` remain fallbacks for
 their corresponding settings. A generic setting takes precedence when present.
 Numeric limits accept positive values, flooring them to integers; invalid values
@@ -139,7 +141,7 @@ instructions and follow-ups. It retains only the existing compatibility cleanup
 of the clients' vision hint when no images survive, so failed downloads do not
 leave an instruction claiming images are attached.
 
-## Verification and provenance
+## Verification
 
 ```sh
 npm test
@@ -151,13 +153,3 @@ timeouts, limits and `Retry-After`, bounded search, images/SSRF/redirects, reaso
 language instruction forwarding, Gemini capacity/quota handling, malformed
 provider replies, and provider/model/auth failures. Live provider generation is
 a separate, credentialed check.
-
-The route, five helpers, and three test suites were extracted from
-[TrendingNostr at `a03d0b2`](https://github.com/SamSamskies/trendingnostr/tree/a03d0b2e68c2b5ec764659f9338f7d41b1edafb3)
-and compared with
-[AdvancedNostrSearch at `c5d22d6`](https://github.com/SamSamskies/advancednostrsearch/tree/c5d22d6fe96376f8e8927c9a39364f504645f90a).
-The shared tests are deduplicated; TrendingNostr also supplies model/auth error
-classification and language-forwarding coverage. Frontend imports in tests were
-replaced with request fixtures. Extraction changes are the generic image-fetch
-User-Agent, standalone setup/docs, and rejecting JSON `null` with `invalid_request`
-instead of throwing. Additional regressions cover previously untested branches.
