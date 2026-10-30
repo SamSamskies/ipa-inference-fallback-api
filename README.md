@@ -53,6 +53,40 @@ configuration only and does not contact the provider. Use
 configured default returns `503 {"error":"invalid_provider"}`; an invalid caller
 selection returns `400 {"error":"invalid_provider"}`.
 
+## Smoke testing
+
+Add provider keys to `.env.local`, then run:
+
+```sh
+npm run smoke -- --provider ollama
+npm run smoke -- --provider gemini
+npm run smoke
+```
+
+The script starts a temporary local HTTP server around the actual inference
+handler, probes configuration, and sends a short generation request to the chosen
+provider. No Vercel login or running development server is needed. Without
+`--provider`, it uses `DEFAULT_INFERENCE_PROVIDER` (Ollama when unset).
+Keys and model settings load from `.env.local` using the same rules as the API.
+Web search is off and reasoning effort is `none`. This makes a real provider API
+call and may consume quota or incur a small charge.
+
+The script prints the model, response, and elapsed time, then shuts down its
+temporary server. It exits nonzero for configuration, connection, or provider
+failures and malformed responses. API keys are never printed or sent to the
+endpoint by the script; they stay in the server's provider requests.
+
+To test a running Vercel development server or deployed endpoint instead:
+
+```sh
+npm run smoke -- --provider gemini --url http://localhost:3000/api/inference
+npm run smoke -- --provider ollama --url https://your-service.vercel.app/api/inference
+```
+
+With `--url`, the target server supplies its own provider keys and model settings.
+Omit `--provider` to test that server's default. Use `npm run smoke -- --help` for
+usage.
+
 ## Configuration
 
 | Variable | Default / behavior |
