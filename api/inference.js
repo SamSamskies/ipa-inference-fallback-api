@@ -68,6 +68,10 @@ function releaseClient(key) {
   return clientQuota.release(key);
 }
 
+function commitClient(key) {
+  return clientQuota.commit(key);
+}
+
 const IMAGE_MEDIA_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -615,6 +619,7 @@ export default async function handler(req, res) {
         webSearch: body.webSearch !== false,
         signal,
       });
+      await commitClient(clientId);
       res.status(200).json({
         content: withSources(result.content, result.sources),
         model: result.model,
@@ -837,6 +842,7 @@ export default async function handler(req, res) {
     return;
   }
 
+  await commitClient(clientId);
   res.status(200).json({
     content: withSources(text, extractGroundingSources(geminiJson)),
     model,

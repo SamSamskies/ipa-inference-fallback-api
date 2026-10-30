@@ -64,6 +64,17 @@ test("release after UTC rollover still frees that day's slot", async () => {
   assert.deepEqual(quota.buckets.get("alice"), { day: "2026-01-01", count: 0 });
 });
 
+test("next-day failure refunds the new day's slot after prior-day successes", async () => {
+  let day = "2026-01-01";
+  const quota = createClientQuota({ today: () => day });
+  assert.equal(await quota.tryConsume("alice", 2), true);
+  await quota.commit("alice");
+  day = "2026-01-02";
+  assert.equal(await quota.tryConsume("alice", 2), true);
+  await quota.release("alice");
+  assert.deepEqual(quota.buckets.get("alice"), { day: "2026-01-02", count: 0 });
+});
+
 test("release after UTC rollover does not decrement the next day's slot", async () => {
   let day = "2026-01-01";
   const quota = createClientQuota({ today: () => day });
