@@ -4,6 +4,7 @@ import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler, { imageFetchDns } from "../api/inference.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
+import { completeReplit } from "../lib/replit.js";
 
 const URL = "https://samsamskies-inference.replit.app/api/v1/chat/completions";
 const MODEL = "google/gemma-4-26b-a4b-it";
@@ -242,6 +243,34 @@ test("Replit unsafe image URLs become text and the stale vision hint is removed"
   assert.equal((await call({body:{webSearch:false,messages:[{role:"system",content:`Explain this.\n${VISION_HINT}`},
     {role:"user",content:[{type:"image",url:"https://private.example.test/photo.png"},{type:"text",text:"Describe this"}]}]}})).statusCode,200);
   assert.equal(imageRequests.mock.callCount(),0);
+});
+
+test("Replit leftover fileData becomes text instead of an empty content part", async () => {
+  let sent;
+  globalThis.fetch = async (_url, init) => {
+    sent = JSON.parse(init.body).messages;
+    return success();
+  };
+  await completeReplit({
+    prompt: {
+      contents: [{
+        role: "user",
+        parts: [
+          { fileData: { fileUri: "https://images.example.test/photo.png" } },
+          { text: "Describe this" },
+        ],
+      }],
+    },
+    model: MODEL,
+    key: "test-replit-key",
+    options: {},
+    webSearch: false,
+    signal: AbortSignal.timeout(1000),
+  });
+  assert.deepEqual(sent, [{
+    role: "user",
+    content: "Describe this\n\nhttps://images.example.test/photo.png",
+  }]);
 });
 
 test("Replit can be the default while concurrent requests keep three providers separate", async () => {
