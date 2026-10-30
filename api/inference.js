@@ -576,6 +576,12 @@ export default async function handler(req, res) {
     return;
   }
 
+  const useWebSearch = parseWebSearch(body.webSearch);
+  if (useWebSearch === null) {
+    res.status(400).json({ error: "invalid_request" });
+    return;
+  }
+
   const clientId = clientToken(req);
   if (!clientId) {
     res.status(400).json({ error: "missing_client_token" });
@@ -616,7 +622,7 @@ export default async function handler(req, res) {
         model: modelId(provider),
         key: apiKey(provider),
         options,
-        webSearch: body.webSearch !== false,
+        webSearch: useWebSearch,
         signal,
       });
       await commitClient(reservation);
@@ -652,7 +658,6 @@ export default async function handler(req, res) {
   }
 
   // Client may omit web search to avoid Google Search grounding cost.
-  const useWebSearch = body.webSearch !== false;
   const geminiBody = {
     contents: prompt.contents,
   };
@@ -849,6 +854,19 @@ export default async function handler(req, res) {
 }
 
 const REASONING_EFFORTS = new Set(["auto", "none", "low", "medium", "high"]);
+
+function parseWebSearch(value) {
+  if (value === undefined) return true;
+  if (typeof value === "boolean") return value;
+  if (value === 0) return false;
+  if (value === 1) return true;
+  if (typeof value === "string") {
+    const flag = value.trim().toLowerCase();
+    if (flag === "0" || flag === "false" || flag === "off") return false;
+    if (flag === "1" || flag === "true" || flag === "on") return true;
+  }
+  return null;
+}
 
 function parseInferenceOptions(raw) {
   if (raw == null) return {};

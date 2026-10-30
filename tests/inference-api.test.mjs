@@ -171,6 +171,28 @@ test("hosted request honors web search, separates the system prompt, and include
   assert.equal(response.headers["Cache-Control"], "no-store");
 });
 
+test("web search treats loosely typed off values as disabled", async () => {
+  for (const webSearch of [false, "false", "FALSE", " off ", "0", 0]) {
+    globalThis.fetch = async (_url, options) => {
+      assert.equal(JSON.parse(options.body).tools, undefined, JSON.stringify(webSearch));
+      return success();
+    };
+    assert.equal((await call({ body: { messages, webSearch } })).statusCode, 200);
+  }
+  for (const webSearch of [true, "true", "ON", "1", 1]) {
+    globalThis.fetch = async (_url, options) => {
+      assert.deepEqual(JSON.parse(options.body).tools, [{ googleSearch: {} }]);
+      return success();
+    };
+    assert.equal((await call({ body: { messages, webSearch } })).statusCode, 200);
+  }
+  globalThis.fetch = async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body).tools, [{ googleSearch: {} }]);
+    return success();
+  };
+  assert.equal((await call({ body: { messages } })).statusCode, 200);
+});
+
 test("hosted image redirects discard the previous body before the next hop", async () => {
   const destroyed = [];
   const imageCalls = [];
@@ -460,6 +482,8 @@ test("invalid JSON values, conversations and options fail before calling a provi
     { messages: [{ role: "system", content: "only system" }] },
     { messages: [{ role: "assistant", content: "starts with assistant" }] },
     { messages: [...messages, { role: "assistant", content: "ends with assistant" }] },
+    { messages, webSearch: null }, { messages, webSearch: "maybe" },
+    { messages, webSearch: [] }, { messages, webSearch: {} },
     ...[[], "bad", { reasoningEffort: "extreme" }, { reasoningEffort: 1 },
       { temperature: -1 }, { temperature: "0.5" }, { temperature: NaN },
       { temperature: Infinity }].map((options) => ({ messages, options })),

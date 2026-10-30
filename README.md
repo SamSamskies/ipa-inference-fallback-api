@@ -175,7 +175,8 @@ destinations and credentials, validate all DNS answers and redirect hops, and pi
 the connection IP while retaining the original Host/TLS SNI. At most five
 redirects are followed. Failed image downloads become text URLs.
 
-`webSearch` defaults to enabled unless explicitly `false`. Ollama calls
+`webSearch` defaults to enabled when omitted. `false`, `0`, `"false"`, and `"off"`
+disable it; other non-boolean values return `400 invalid_request`. Ollama calls
 `https://ollama.com/api` directly and may run up to two `web_search` tools and
 three chat calls. Gemini uses Google Search grounding and retries capacity errors
 once. Replit calls the fixed
