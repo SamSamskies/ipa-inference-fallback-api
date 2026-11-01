@@ -4,7 +4,9 @@ import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler, { imageFetchDns } from "../api/inference.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
-import { completeReplit } from "../lib/replit.js";
+import { generate } from "../lib/providers/replit.js";
+import { normalizeRequest } from "../lib/inference-request.js";
+import { prepareRequestImages } from "../lib/inference-images.js";
 
 const URL = "https://samsamskies-inference.replit.app/api/v1/chat/completions";
 const MODEL = "google/gemma-4-26b-a4b-it";
@@ -245,27 +247,21 @@ test("Replit unsafe image URLs become text and the stale vision hint is removed"
   assert.equal(imageRequests.mock.callCount(),0);
 });
 
-test("Replit leftover fileData becomes text instead of an empty content part", async () => {
+test("shared unread image fallback becomes text in Replit instead of an empty content part", async () => {
   let sent;
   globalThis.fetch = async (_url, init) => {
     sent = JSON.parse(init.body).messages;
     return success();
   };
-  await completeReplit({
-    prompt: {
-      contents: [{
-        role: "user",
-        parts: [
-          { fileData: { fileUri: "https://images.example.test/photo.png" } },
-          { text: "Describe this" },
-        ],
-      }],
-    },
+  const signal = AbortSignal.timeout(1000);
+  const request = normalizeRequest({ messages: [{ role: "user", content: [
+    { type: "image", url: "https://images.example.test/photo.png" },
+    { type: "text", text: "Describe this" },
+  ] }], webSearch: false });
+  await generate(await prepareRequestImages(request, signal, { vision: false }), {
     model: MODEL,
-    key: "test-replit-key",
-    options: {},
-    webSearch: false,
-    signal: AbortSignal.timeout(1000),
+    apiKey: "test-replit-key",
+    signal,
   });
   assert.deepEqual(sent, [{
     role: "user",

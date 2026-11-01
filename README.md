@@ -133,6 +133,43 @@ remain subject to the configured per-request total timeout (120 seconds by defau
 Numeric limits accept positive values, flooring them to integers; invalid values
 fall back to defaults.
 
+## Provider adapters
+
+`lib/providers/registry.js` is the static allowlist for Ollama, Gemini, and Replit.
+Each entry describes its environment settings, default model, capabilities, and
+`generate(normalizedRequest, { model, apiKey, signal, maxTokens? })` function.
+The environment resolver in `lib/provider-config.js` supplies the selected
+configuration for each request; adapters receive credentials and model IDs
+explicitly. Replit's optional completion budget is passed as `maxTokens`.
+
+The shared request format has `system`, `messages`, `options`, and `webSearch`.
+Messages use `user`/`assistant` roles and `parts` containing `{ text }` or
+`{ image: { mediaType, data } }`. URL images initially contain
+`{ image: { mediaType, url } }`; shared image preparation downloads them before
+generation, retaining failed URLs as text. Shared helpers own validation, image
+safety and size limits, stale vision-hint removal, source formatting, and HTTP
+error responses. Adapters own native message mapping, search, reasoning,
+response parsing, and provider-specific retry/error classification.
+
+Registry entries define `capabilities: { vision, webSearch, reasoning }` and a
+`models` map of exact model IDs to partial capability overrides. For example,
+`models: { "your-text-model": { vision: false, reasoning: false } }` disables
+images and explicit reasoning controls for that configured model while inheriting
+the provider's search setting. Image URLs then remain text, inline images are
+omitted, and unsupported search/reasoning controls are omitted from native calls.
+These are server-owned settings; clients cannot override them. Defaults preserve
+the existing best-effort controls for configured models, including unknown model
+IDs; this metadata does not discover or guarantee upstream model support.
+
+To replace an implementation, update its registry entry and implement the JSDoc
+contract there. Return `{ content, model, sources }` and use the shared
+`inferenceError` helper for classified failures. Transport and parsing exceptions
+are sanitized by the HTTP boundary. An optional `acquire(clientId)` hook reserves
+provider capacity before image downloads and returns a release function called
+on every exit. Ollama uses this hook for its existing process-local limits.
+Provider endpoints remain fixed inside each adapter. Application clients keep
+using the same `/api/inference` contract.
+
 ## Request and response contract
 
 Select a provider with `POST /api/inference?provider=ollama`,
