@@ -1,5 +1,6 @@
 /** Hosted IPA fallback; provider-native behavior lives in lib/providers. */
 import { clientQuota } from "../lib/client-quota.js";
+import { appRateLimit } from "../lib/app-rate-limit.js";
 import { authenticateApp, requestProviderKey } from "../lib/app-auth.js";
 import { resolveAppProviderConfig } from "../lib/app-config.js";
 import { envInt } from "../lib/env.js";
@@ -110,7 +111,7 @@ export default async function handler(req, res) {
   let body;
   try {
     const text = readBody(req);
-    if (text.length > MAX_BODY_BYTES) {
+    if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
       res.status(413).json({ error: "payload_too_large" });
       return;
     }
@@ -139,6 +140,12 @@ export default async function handler(req, res) {
   const clientId = clientToken(req);
   if (!clientId) {
     res.status(400).json({ error: "missing_client_token" });
+    return;
+  }
+  try {
+    await appRateLimit.admit(appId);
+  } catch (error) {
+    sendInferenceError(res, error);
     return;
   }
   const scopedClientId = JSON.stringify([appId, clientId]);

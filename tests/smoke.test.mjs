@@ -99,6 +99,7 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
         if (scenario === "bad_json") return new Response("not JSON");
         if (init.method === "GET") return Response.json({ok: scenario !== "bad_probe"});
         if (scenario === "limited") return Response.json({error:"rate_limited"}, {status:429, headers:{"Retry-After":"30"}});
+        if (scenario === "rate_limit_unavailable") return Response.json({error:"rate_limit_unavailable"}, {status:503, headers:{"Retry-After":"5"}});
         if (scenario === "empty") return Response.json({content:"",model:"mock-model"});
         if (scenario === "missing_model") return Response.json({content:"smoke test OK"});
         if (scenario === "raw_error") return Response.json({error:"private-gemini-test-key"}, {status:502});
@@ -217,6 +218,7 @@ test("smoke failures exit nonzero with useful endpoint errors", () => {
     ["unreachable", /Could not reach the endpoint/],
     ["missing_key", /HTTP 503: missing_api_key/],
     ["limited", /HTTP 429: rate_limited.*Retry after 30s/],
+    ["rate_limit_unavailable", /HTTP 503: rate_limit_unavailable.*Retry after 5s/],
     ["bad_json", /without a JSON response/],
     ["bad_probe", /invalid configuration probe/],
     ["empty", /invalid inference response/],

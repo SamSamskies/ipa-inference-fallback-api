@@ -27,7 +27,7 @@ const PUBLIC_ERRORS = new Set([
   "missing_api_key", "invalid_api_key", "disabled", "invalid_provider", "invalid_model",
   "invalid_json", "invalid_request", "missing_client_token", "forbidden_origin",
   "payload_too_large", "client_limit", "client_capacity", "rate_limited", "quota_exhausted",
-  "search_quota", "provider_error", "model_unavailable", "provider_auth", "provider_busy",
+  "search_quota", "provider_error", "model_unavailable", "provider_auth", "provider_busy", "rate_limit_unavailable",
 ]);
 function publicError(message) {
   return Object.assign(new Error(message), { safeToPrint: true });
