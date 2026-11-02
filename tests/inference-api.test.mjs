@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import { EventEmitter } from "node:events";
 import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
@@ -11,7 +12,7 @@ const SYSTEM_PROMPT_IMAGES_LINE =
 
 const originalFetch = globalThis.fetch;
 const originalLookupAll = imageFetchDns.lookupAll;
-const envNames = [
+const envNames = ["TRENDINGNOSTR_APP_SECRET",
   "GEMINI_API_KEY",
   "INFERENCE_FALLBACK_ENABLED",
   "INFERENCE_CLIENT_DAILY_LIMIT",
@@ -32,6 +33,7 @@ beforeEach(() => {
   imageFetchDns.lookupAll = async () => [
     { address: "203.0.113.10", family: 4 },
   ];
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -46,6 +48,7 @@ afterEach(() => {
 function mockPinnedHttpsImage(bytes, contentType = "image/png") {
   const calls = [];
   mock.method(https, "request", (options, onResponse) => {
+    assert.doesNotMatch(JSON.stringify(options.headers), /test-key-not-a-credential|private-test-app-secret/);
     calls.push(options);
     const req = new EventEmitter();
     req.end = () =>
@@ -77,7 +80,7 @@ async function call({
   const req = {
     method,
     url,
-    headers: { host: "example.test", origin, "x-inference-client": token, ...headers },
+    headers: { ...appHeaders("test-key-not-a-credential"), host: "example.test", origin, "x-inference-client": token, ...headers },
     body: body && typeof body === "object" && !Array.isArray(body) ? { model: "test-model", ...body } : body,
   };
   const res = {
@@ -108,10 +111,9 @@ function success(content = "Nostr is an open protocol.") {
   });
 }
 
-test("missing hosted configuration reports unavailable without contacting a provider", async () => {
-  delete process.env.GEMINI_API_KEY;
-  const response = await call({ method: "GET" });
-  assert.equal(response.statusCode, 503);
+test("missing request credential fails without contacting a provider", async () => {
+  const response = await call({ method: "GET", headers: { "x-inference-provider-key": undefined } });
+  assert.equal(response.statusCode, 400);
   assert.equal(response.body.error, "missing_api_key");
 });
 
@@ -469,7 +471,8 @@ test("probe, preflight and method handling preserve the HTTP contract", async ()
   assert.equal((await call({ method: "OPTIONS", origin: "https://other.test" })).statusCode, 403);
   assert.equal((await call({ method: "OPTIONS", origin: undefined, headers: { origin: undefined } })).statusCode, 204);
   assert.equal((await call({ method: "PUT" })).body.error, "method_not_allowed");
-  assert.equal((await call({ headers: { origin: undefined } })).body.error, "forbidden_origin");
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ headers: { origin: undefined } })).statusCode, 200);
 });
 
 test("invalid JSON values, conversations and options fail before calling a provider", async () => {

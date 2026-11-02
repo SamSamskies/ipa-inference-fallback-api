@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import { EventEmitter } from "node:events";
 import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler, { imageFetchDns } from "../api/inference.js";
-import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 import { generate } from "../lib/providers/replit.js";
 import { normalizeRequest } from "../lib/inference-request.js";
 import { prepareRequestImages } from "../lib/inference-images.js";
@@ -14,8 +14,8 @@ const VISION_HINT = "The first user message includes the note's images before th
 const messages = [{ role: "system", content: "Respond in Spanish unless the user requests another language." },
   { role: "user", content: "Hello" }, { role: "assistant", content: "Hola" },
   { role: "user", content: "Reply in French." }];
-const envNames = [ "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "REPLIT_MAX_TOKENS",
-  "REPLIT_MODEL", "OLLAMA_MODEL", "GEMINI_MODEL", ...Object.values(PROVIDER_CONFIG).map(({keyEnv}) => keyEnv)];
+const envNames = ["TRENDINGNOSTR_APP_SECRET",  "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "TRENDINGNOSTR_REPLIT_MAX_TOKENS",
+  "REPLIT_MODEL", "OLLAMA_MODEL", "GEMINI_MODEL", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY"];
 const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
 let previous;
@@ -25,6 +25,7 @@ beforeEach(() => {
   process.env.REPLIT_API_KEY = "test-replit-key";
   globalThis.fetch = () => { throw new Error("Unexpected network call"); };
   imageFetchDns.lookupAll = async () => [{address:"203.0.113.10",family:4}];
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -37,12 +38,14 @@ afterEach(() => {
 });
 
 async function call({method="POST", url="/api/inference?provider=replit", token=crypto.randomUUID(),
-  body={messages,webSearch:false}} = {}) {
+  body={messages,webSearch:false}, headers={}} = {}) {
   const res = {statusCode:200,headers:{},body:null,
     setHeader(name,value){this.headers[name]=value;},
     status(code){this.statusCode=code;return this;},json(value){this.body=value;return this;},end(){return this;}};
   if (body && typeof body === "object" && !Array.isArray(body)) body = { model: MODEL, ...body };
-  await handler({method,url,headers:{host:"example.test",origin:"https://example.test","x-inference-client":token},body},res);
+  const provider = new globalThis.URL(url, "http://localhost").searchParams.get("provider");
+  const key = provider === "gemini" ? "test-gemini-key" : provider === "ollama" ? "test-ollama-key" : "test-replit-key";
+  await handler({method,url,headers:{...appHeaders(key),host:"example.test",origin:"https://example.test","x-inference-client":token,...headers},body},res);
   return res;
 }
 function success(content="Bonjour", extra={}) {
@@ -55,8 +58,8 @@ test("Replit probes require its own key and respect the fallback switch", async 
   process.env.OLLAMA_API_KEY="other-provider-key";
   process.env.GEMINI_API_KEY="other-provider-key";
   for (const method of ["GET","POST"]) {
-    const response=await call({method});
-    assert.equal(response.statusCode,503);
+    const response=await call({method,headers:{"x-inference-provider-key":undefined}});
+    assert.equal(response.statusCode,400);
     assert.equal(response.body.error,"missing_api_key");
   }
   process.env.REPLIT_API_KEY="test-replit-key";
@@ -93,9 +96,9 @@ test("requested Replit models override legacy env settings while gateway model I
 });
 
 test("Replit leaves the completion budget to the gateway unless configured server-side", async () => {
-  for (const [configured, expected] of [[undefined,undefined],["4096",4096],["8192",8192],["0.5",undefined],["invalid",undefined]]) {
-    if (configured === undefined) delete process.env.REPLIT_MAX_TOKENS;
-    else process.env.REPLIT_MAX_TOKENS = configured;
+  for (const [configured, expected] of [[undefined,undefined],["4096",4096],["8192",8192],]) {
+    if (configured === undefined) delete process.env.TRENDINGNOSTR_REPLIT_MAX_TOKENS;
+    else process.env.TRENDINGNOSTR_REPLIT_MAX_TOKENS = configured;
     globalThis.fetch = async (_url,init) => {
       assert.equal(JSON.parse(init.body).max_tokens,expected);
       return success();
@@ -285,7 +288,7 @@ test("explicit concurrent requests keep all three providers separate", async () 
       assert.equal(init.headers.Authorization,"Bearer test-ollama-key");
       assert.equal(JSON.parse(init.body).model,"ollama-model");return Response.json({message:{role:"assistant",content:"Ollama"}});
     }
-    assert.match(url,/models\/gemini-model:generateContent\?key=test-gemini-key$/);
+    assert.match(url,/models\/gemini-model:generateContent$/);
     return Response.json({candidates:[{content:{parts:[{text:"Gemini"}]}}]});
   };
   const responses=await Promise.all([

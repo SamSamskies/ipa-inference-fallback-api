@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import { EventEmitter } from "node:events";
 import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
@@ -11,7 +12,7 @@ const SYSTEM_PROMPT_IMAGES_LINE =
 const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
 const originalNow = Date.now;
-const envNames = [
+const envNames = ["TRENDINGNOSTR_APP_SECRET",
   "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
   "GEMINI_API_KEY", "GEMINI_MODEL",
   "OLLAMA_API_KEY", "OLLAMA_MODEL", "OLLAMA_REQUESTS_PER_MINUTE",
@@ -28,6 +29,7 @@ beforeEach(() => {
   Date.now = () => time;
   imageFetchDns.lookupAll = async () => [{ address: "203.0.113.10", family: 4 }];
   globalThis.fetch = () => { throw new Error("Unexpected fetch"); };
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -67,7 +69,7 @@ const messages = [
 function success(content = "An open protocol.") {
   return Response.json({ message: { role: "assistant", content }, done: true });
 }
-async function call({ method = "POST", token = crypto.randomUUID(), body = { messages, webSearch: false }, url = "/api/inference?provider=ollama" } = {}) {
+async function call({ method = "POST", token = crypto.randomUUID(), body = { messages, webSearch: false }, url = "/api/inference?provider=ollama", headers = {} } = {}) {
   const res = {
     statusCode: 200, headers: {}, body: null,
     setHeader(name, value) { this.headers[name] = value; },
@@ -79,7 +81,7 @@ async function call({ method = "POST", token = crypto.randomUUID(), body = { mes
   if (body && typeof body === "object" && !Array.isArray(body)) {
     body = { model: provider === "gemini" ? "gemini-test-model" : "gemma4:cloud", ...body };
   }
-  await handler({ method, url, headers: { host: "example.test", origin: "https://example.test", "x-inference-client": token }, body }, res);
+  await handler({ method, url, headers: { ...appHeaders(provider === "gemini" ? "test-gemini-key" : "test-ollama-key"), host: "example.test", origin: "https://example.test", "x-inference-client": token, ...headers }, body }, res);
   return res;
 }
 
@@ -109,8 +111,8 @@ test("Ollama never reuses Gemini credentials", async () => {
   delete process.env.OLLAMA_API_KEY;
   process.env.GEMINI_API_KEY = "gemini-key";
   for (const method of ["GET", "POST"]) {
-    const response = await call({ method });
-    assert.equal(response.statusCode, 503);
+    const response = await call({ method, headers: { "x-inference-provider-key": undefined } });
+    assert.equal(response.statusCode, 400);
     assert.equal(response.body.error, "missing_api_key");
   }
 });
@@ -137,7 +139,7 @@ test("requests explicitly select either provider", async () => {
   globalThis.fetch = async (url, init) => {
     paths.push(String(url));
     if (String(url).startsWith("https://generativelanguage.googleapis.com/")) {
-      assert.match(url, /models\/gemini-test-model:generateContent\?key=test-gemini-key$/);
+      assert.match(url, /models\/gemini-test-model:generateContent$/);
       return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
     }
     assert.equal(url, "https://ollama.com/api/chat");
@@ -154,16 +156,16 @@ test("requests explicitly select either provider", async () => {
 
 test("provider-specific probes and POSTs require that provider's credentials", async () => {
   for (const method of ["GET", "POST"]) {
-    const response = await call({ method, url: "/api/inference?provider=gemini" });
-    assert.equal(response.statusCode, 503);
+    const response = await call({ method, url: "/api/inference?provider=gemini", headers: { "x-inference-provider-key": undefined } });
+    assert.equal(response.statusCode, 400);
     assert.equal(response.body.error, "missing_api_key");
   }
   process.env.GEMINI_API_KEY = "test-gemini-key";
   assert.deepEqual((await call({ method: "GET", url: "/api/inference?provider=gemini" })).body, { ok: true });
   delete process.env.OLLAMA_API_KEY;
   for (const method of ["GET", "POST"]) {
-    const response = await call({ method, url: "/api/inference?provider=ollama" });
-    assert.equal(response.statusCode, 503);
+    const response = await call({ method, url: "/api/inference?provider=ollama", headers: { "x-inference-provider-key": undefined } });
+    assert.equal(response.statusCode, 400);
     assert.equal(response.body.error, "missing_api_key");
   }
 });
@@ -217,7 +219,7 @@ test("concurrent provider selections keep their credentials and models separate"
       assert.equal(JSON.parse(init.body).model, "ollama-test-model");
       return success("Ollama answer");
     }
-    assert.match(url, /models\/gemini-test-model:generateContent\?key=test-gemini-key$/);
+    assert.match(url, /models\/gemini-test-model:generateContent$/);
     assert.equal(init.headers.Authorization, undefined);
     return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
   };

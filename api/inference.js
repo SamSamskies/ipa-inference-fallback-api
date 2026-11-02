@@ -1,8 +1,9 @@
 /** Hosted IPA fallback; provider-native behavior lives in lib/providers. */
 import { clientQuota } from "../lib/client-quota.js";
 import { appEnvNames } from "../lib/apps.js";
+import { authenticateApp, requestProviderKey } from "../lib/app-auth.js";
+import { resolveAppProviderConfig } from "../lib/app-config.js";
 import { envInt, loadLocalEnvFallback } from "../lib/env.js";
-import { resolveProviderConfig } from "../lib/provider-config.js";
 import { capabilitiesForModel, getProvider } from "../lib/providers/registry.js";
 import { applyCapabilities, MAX_BODY_BYTES, normalizeModel, normalizeRequest } from "../lib/inference-request.js";
 import { prepareRequestImages } from "../lib/inference-images.js";
@@ -14,12 +15,16 @@ import { applyCors, INFERENCE_CLIENT_HEADER, originAllowed } from "../lib/http.j
 export { imageFetchDns } from "../lib/inference-images.js";
 
 const DEFAULT_CLIENT_DAILY = 50;
-loadLocalEnvFallback(["INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_", ...appEnvNames()]);
+loadLocalEnvFallback([
+  "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "INFERENCE_REQUEST_TIMEOUT_MS",
+  "OLLAMA_REQUESTS_PER_MINUTE", "OLLAMA_CLIENT_REQUESTS_PER_MINUTE", "OLLAMA_MAX_CONCURRENT",
+  ...appEnvNames(),
+], { exact: true });
 
-function fallbackEnabled(apiKey) {
+function fallbackEnabled() {
   const flag = (process.env.INFERENCE_FALLBACK_ENABLED ?? "").trim().toLowerCase();
   if (["0", "false", "off"].includes(flag)) return false;
-  return Boolean(apiKey);
+  return true;
 }
 
 function clientDailyLimit() {
@@ -54,6 +59,14 @@ export default async function handler(req, res) {
     return;
   }
 
+  let appId;
+  try {
+    appId = authenticateApp(req);
+  } catch (error) {
+    sendInferenceError(res, error);
+    return;
+  }
+
   const requestedProviders = new URL(
     req.url || "/api/inference", "http://localhost"
   ).searchParams.getAll("provider");
@@ -63,30 +76,38 @@ export default async function handler(req, res) {
     return;
   }
 
-  const selected = resolveProviderConfig(providerId);
-  const { adapter, apiKey, maxTokens } = selected;
+  let selected;
+  let apiKey;
+  try {
+    selected = resolveAppProviderConfig(appId, providerId);
+    apiKey = requestProviderKey(req);
+  } catch (error) {
+    sendInferenceError(res, error);
+    return;
+  }
+  const { adapter, maxTokens } = selected;
+
+  if (req.headers.origin && !originAllowed(req)) {
+    res.status(403).json({ error: "forbidden_origin" });
+    return;
+  }
 
   if (req.method === "GET") {
-    if (fallbackEnabled(apiKey)) {
+    if (fallbackEnabled()) {
       res.status(200).json({ ok: true });
       return;
     }
     res.status(503).json({
       ok: false,
-      error: apiKey ? "disabled" : "missing_api_key",
+      error: "disabled",
     });
     return;
   }
 
-  if (!fallbackEnabled(apiKey)) {
+  if (!fallbackEnabled()) {
     res.status(503).json({
-      error: apiKey ? "disabled" : "missing_api_key",
+      error: "disabled",
     });
-    return;
-  }
-
-  if (!originAllowed(req)) {
-    res.status(403).json({ error: "forbidden_origin" });
     return;
   }
 
@@ -127,7 +148,8 @@ export default async function handler(req, res) {
     res.status(400).json({ error: "missing_client_token" });
     return;
   }
-  const reservation = await clientQuota.tryConsume(clientId, clientDailyLimit());
+  const scopedClientId = JSON.stringify([appId, clientId]);
+  const reservation = await clientQuota.tryConsume(scopedClientId, clientDailyLimit());
   if (typeof reservation === "string") {
     res.status(429).json({ error: reservation });
     return;
@@ -137,11 +159,14 @@ export default async function handler(req, res) {
   const capabilities = capabilitiesForModel(adapter, model);
   const signal = AbortSignal.timeout(requestTimeoutMs());
   try {
-    release = adapter.acquire?.(clientId);
+    release = adapter.acquire?.(scopedClientId);
     const prepared = await prepareRequestImages(applyCapabilities(request, capabilities), signal, capabilities);
     const result = await adapter.generate(prepared, { model, apiKey, signal, maxTokens });
     await clientQuota.commit(reservation);
-    res.status(200).json({ content: withSources(result.content, result.sources), model: result.model });
+    res.status(200).json({
+      content: withSources(result.content, result.sources).replaceAll(apiKey, "[redacted]"),
+      model: result.model.replaceAll(apiKey, "[redacted]"),
+    });
   } catch (error) {
     await clientQuota.release(reservation);
     sendInferenceError(res, error, signal);

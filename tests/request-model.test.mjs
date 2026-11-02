@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler from "../api/inference.js";
 import { clientQuota } from "../lib/client-quota.js";
 
 const providerIds = ["ollama", "gemini", "replit"];
-const envNames = ["INFERENCE_FALLBACK_ENABLED", "DEFAULT_INFERENCE_PROVIDER",
+const envNames = ["TRENDINGNOSTR_APP_SECRET", "INFERENCE_FALLBACK_ENABLED", "DEFAULT_INFERENCE_PROVIDER",
   ...providerIds.flatMap((id) => [`${id.toUpperCase()}_API_KEY`, `${id.toUpperCase()}_MODEL`])];
 const originalFetch = globalThis.fetch;
 let previous;
@@ -17,6 +18,7 @@ beforeEach(() => {
     process.env[`${id.toUpperCase()}_MODEL`] = "ignored-environment-model";
   }
   globalThis.fetch = () => { throw new Error("Unexpected upstream request"); };
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -38,7 +40,7 @@ async function call(provider, { method = "POST", body = { messages, webSearch: f
   };
   await handler({
     method, url: provider === undefined ? "/api/inference" : `/api/inference?provider=${provider}${query}`,
-    headers: { host: "example.test", origin: "https://example.test", "x-inference-client": crypto.randomUUID() },
+    headers: { ...appHeaders(`private-${provider}-key`), host: "example.test", origin: "https://example.test", "x-inference-client": crypto.randomUUID() },
     body,
   }, res);
   return res;
@@ -88,7 +90,8 @@ for (const provider of providerIds) {
     globalThis.fetch = async (url, init) => {
       calls++;
       if (provider === "gemini") {
-        assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/models/backend%2Fmodel%3Atag:generateContent?key=private-gemini-key");
+        assert.equal(url, "https://generativelanguage.googleapis.com/v1beta/models/backend%2Fmodel%3Atag:generateContent");
+        assert.equal(init.headers["x-goog-api-key"], "private-gemini-key");
         return Response.json({ candidates: [{ content: { parts: [{ text: "OK" }] } }] });
       }
       assert.equal(JSON.parse(init.body).model, "backend/model:tag");

@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler from "../api/inference.js";
 import { applyCapabilities, normalizeRequest } from "../lib/inference-request.js";
 import { prepareRequestImages } from "../lib/inference-images.js";
 import { sendInferenceError } from "../lib/inference-response.js";
-import { resolveProviderConfig } from "../lib/provider-config.js";
 import { capabilitiesForModel, getProvider, providers } from "../lib/providers/registry.js";
 
 const originalFetch = globalThis.fetch;
-const envNames = ["REPLIT_MAX_TOKENS", "INFERENCE_FALLBACK_ENABLED",
-  ...Object.values(providers).map(({ config }) => config.keyEnv)];
+const envNames = ["TRENDINGNOSTR_APP_SECRET", "REPLIT_MAX_TOKENS", "INFERENCE_FALLBACK_ENABLED",
+  "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY"];
 let previous;
 let time = Date.now();
 beforeEach(() => {
@@ -18,6 +18,7 @@ beforeEach(() => {
   time += 120_000; // Expire the process-local Ollama limiter between contracts.
   mock.method(Date, "now", () => time);
   globalThis.fetch = () => { throw new Error("Unexpected network call"); };
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -40,8 +41,9 @@ const fixtures = {
   gemini: {
     success: (content = "Answer") => Response.json({ candidates: [{ content: { parts: [{ text: content }] } }] }),
     assertRequest(url, init, model, key) {
-      assert.equal(url, `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`);
+      assert.equal(url, `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`);
       assert.equal(init.headers.Authorization, undefined);
+      assert.equal(init.headers["x-goog-api-key"], key);
     },
   },
   replit: {
@@ -83,7 +85,6 @@ test("registry is a fixed allowlist with provider and exact-model capability met
   assert.deepEqual(Object.keys(providers).sort(), ["gemini", "ollama", "replit"]);
   for (const id of ["missing", "toString", "constructor", "__proto__", "https://custom.test"]) {
     assert.equal(getProvider(id), undefined);
-    assert.equal(resolveProviderConfig(id), undefined);
   }
   for (const adapter of Object.values(providers)) {
     assert.equal(typeof adapter.generate, "function");
@@ -136,7 +137,7 @@ for (const [id, adapter] of Object.entries(providers)) {
     const signal = AbortSignal.timeout(1000);
     const seen = [];
     globalThis.fetch = async (url, init) => {
-      const which = id === "gemini" ? new URL(url).searchParams.get("key") : init.headers.Authorization.slice(7);
+      const which = id === "gemini" ? init.headers["x-goog-api-key"] : init.headers.Authorization.slice(7);
       const index = which === "key-a" ? "a" : "b";
       fixture.assertRequest(url, init, `model-${index}`, `key-${index}`);
       const body = JSON.parse(init.body);
@@ -197,7 +198,6 @@ for (const [id, adapter] of Object.entries(providers)) {
   test(`${id} endpoint applies server model capability restrictions before image fetching and generation`, async () => {
     const model = "restricted-model";
     adapter.models[model] = { vision: false, webSearch: false, reasoning: false };
-    process.env[adapter.config.keyEnv] = "app-key";
     delete process.env.INFERENCE_FALLBACK_ENABLED;
     const hint = "The first user message includes the note's images before the text. Look at those images when they matter.";
     let calls = 0;
@@ -219,7 +219,7 @@ for (const [id, adapter] of Object.entries(providers)) {
       const res = response();
       await handler({
         method: "POST", url: `/api/inference?provider=${id}`,
-        headers: { host: "example.test", origin: "https://example.test", "x-inference-client": crypto.randomUUID() },
+        headers: { ...appHeaders("app-key"), host: "example.test", origin: "https://example.test", "x-inference-client": crypto.randomUUID() },
         body: {
           model, apiKey: "client-key", capabilities: { vision: true, webSearch: true, reasoning: true },
           webSearch: true, options: { reasoningEffort: "high", temperature: 0 },

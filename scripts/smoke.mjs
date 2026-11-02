@@ -2,18 +2,36 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { parseArgs } from "node:util";
 import handler from "../api/inference.js";
-import { PROVIDER_CONFIG } from "../lib/provider-config.js";
+import { apps, getApp } from "../lib/apps.js";
+import { providers } from "../lib/providers/registry.js";
+import { loadLocalEnvFallback } from "../lib/env.js";
+import { INFERENCE_APP_HEADER, INFERENCE_PROVIDER_KEY_HEADER } from "../lib/http.js";
+import { requestProviderKey } from "../lib/app-auth.js";
 import { smokeTimeoutMs } from "../lib/timeouts.js";
 import { normalizeModel } from "../lib/inference-request.js";
 
-const HELP = `Usage: npm run smoke -- --provider ${Object.keys(PROVIDER_CONFIG).join("|")} --model MODEL [--url ENDPOINT]
+const HELP = `Usage: npm run smoke -- --app ${Object.keys(apps).join("|")} --provider ${Object.keys(providers).join("|")} --model MODEL [--url ENDPOINT]
 
-By default, start a temporary local server using keys from .env.local.
+By default, start a temporary local server.
+--app selects the app secret from its registered *_APP_SECRET environment setting.
+Set INFERENCE_SMOKE_PROVIDER_KEY in the caller environment or local .env.local.
+App and provider credentials are sent only in headers; never as CLI arguments.
 --provider is required and is sent in the query parameter.
 --model is required and is sent in the inference request body.
-Use --url to test an existing /api/inference endpoint with its own server keys.
+Use --url to test an HTTPS endpoint (HTTP is allowed only for loopback development).
 Runs a configuration probe and a short generation with web search disabled.
 `;
+
+const PUBLIC_ERRORS = new Set([
+  "unauthorized_app", "invalid_app_config", "provider_not_allowed", "provider_disabled",
+  "missing_api_key", "invalid_api_key", "disabled", "invalid_provider", "invalid_model",
+  "invalid_json", "invalid_request", "missing_client_token", "forbidden_origin",
+  "payload_too_large", "client_limit", "client_capacity", "rate_limited", "quota_exhausted",
+  "search_quota", "provider_error", "model_unavailable", "provider_auth", "provider_busy",
+]);
+function publicError(message) {
+  return Object.assign(new Error(message), { safeToPrint: true });
+}
 
 async function startLocalServer() {
   const server = createServer(async (req, res) => {
@@ -35,23 +53,21 @@ async function startLocalServer() {
   return server;
 }
 
-async function request(url, init, provider, local) {
-  const response = await fetch(url, init);
+async function request(url, init) {
+  const response = await fetch(url, { ...init, redirect: "error" });
   let body;
   try {
     body = await response.json();
   } catch {
-    throw new Error(`${init.method} returned HTTP ${response.status} without a JSON response.`);
+    throw publicError(`${init.method} returned HTTP ${response.status} without a JSON response.`);
   }
   if (!response.ok) {
     // Only print known endpoint error codes, never raw provider errors or keys.
-    const code = typeof body?.error === "string" && /^[a-z_]+$/.test(body.error)
+    const code = PUBLIC_ERRORS.has(body?.error)
       ? body.error : "unexpected_error";
-    const hint = code === "missing_api_key" && local
-      ? ` Set ${PROVIDER_CONFIG[provider].keyEnv} in .env.local.` : "";
     const retryAfter = response.headers.get("retry-after");
     const retry = retryAfter && /^\d+$/.test(retryAfter) ? ` Retry after ${retryAfter}s.` : "";
-    throw new Error(`${init.method} returned HTTP ${response.status}: ${code}.${hint}${retry}`);
+    throw publicError(`${init.method} returned HTTP ${response.status}: ${code}.${retry}`);
   }
   return body;
 }
@@ -61,24 +77,47 @@ async function main() {
   try {
     ({ values } = parseArgs({ options: {
       provider: { type: "string" }, model: { type: "string" },
+      app: { type: "string" },
       url: { type: "string" }, help: { type: "boolean", short: "h" },
     } }));
   } catch {
-    throw new Error("Invalid arguments. Use npm run smoke -- --help for usage.");
+    throw publicError("Invalid arguments. Use npm run smoke -- --help for usage.");
   }
   if (values.help) {
     console.log(HELP);
     return;
   }
   const provider = values.provider?.trim().toLowerCase();
-  if (!Object.hasOwn(PROVIDER_CONFIG, provider)) {
-    throw new Error(`--provider is required: choose ${Object.keys(PROVIDER_CONFIG).join(", ")}.`);
+  if (!Object.hasOwn(providers, provider)) {
+    throw publicError(`--provider is required: choose ${Object.keys(providers).join(", ")}.`);
   }
+
+  const appId = values.app;
+  const app = getApp(appId);
+  if (!app?.enabled) throw publicError(`--app is required: choose ${Object.keys(apps).join(", ")}.`);
+  loadLocalEnvFallback(["INFERENCE_SMOKE_PROVIDER_KEY"], { exact: true });
+  const appSecret = process.env[app.authSecretEnv]?.trim();
+  if (!appSecret || appSecret.length > 4000 || !/^[\x21-\x7e]+$/.test(appSecret) || appSecret.includes(",")) {
+    throw publicError(`Set a valid ${app.authSecretEnv} in the caller environment.`);
+  }
+  let providerKey;
+  try {
+    providerKey = requestProviderKey({ headers: {
+      [INFERENCE_PROVIDER_KEY_HEADER.toLowerCase()]: process.env.INFERENCE_SMOKE_PROVIDER_KEY,
+    } });
+  } catch {
+    throw publicError("Set a valid INFERENCE_SMOKE_PROVIDER_KEY in the caller environment.");
+  }
+  const credentialHeaders = {
+    [INFERENCE_APP_HEADER]: appId,
+    Authorization: `Bearer ${appSecret}`,
+    [INFERENCE_PROVIDER_KEY_HEADER]: providerKey,
+  };
   let model;
   try {
     model = normalizeModel(values.model);
   } catch {
-    throw new Error("--model is required: use a model ID of 1–200 characters without whitespace or control characters.");
+    throw publicError("--model is required: use a model ID of 1–200 characters without whitespace or control characters.");
   }
 
   let server;
@@ -88,10 +127,13 @@ async function main() {
       try {
         url = new URL(values.url);
       } catch {
-        throw new Error("--url must be an absolute HTTP(S) endpoint URL.");
+        throw publicError("--url must be an absolute HTTP(S) endpoint URL.");
       }
       if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
-        throw new Error("--url must be an HTTP(S) endpoint URL without embedded credentials.");
+        throw publicError("--url must be an HTTP(S) endpoint URL without embedded credentials.");
+      }
+      if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+        throw publicError("--url must use HTTPS outside loopback development.");
       }
     } else {
       server = await startLocalServer();
@@ -101,15 +143,15 @@ async function main() {
 
     const signal = AbortSignal.timeout(smokeTimeoutMs());
     const started = Date.now();
-    const probe = await request(url, { method: "GET", signal }, provider, Boolean(server));
-    if (probe?.ok !== true) throw new Error("GET returned an invalid configuration probe.");
+    const probe = await request(url, { method: "GET", signal, headers: credentialHeaders });
+    if (probe?.ok !== true) throw publicError("GET returned an invalid configuration probe.");
     console.log("Configuration probe passed.");
 
     const result = await request(url, {
       method: "POST", signal,
       headers: {
+        ...credentialHeaders,
         "Content-Type": "application/json",
-        Origin: url.origin,
         "X-Inference-Client": randomUUID(),
       },
       body: JSON.stringify({
@@ -118,14 +160,15 @@ async function main() {
         webSearch: false,
         options: { reasoningEffort: "none", temperature: 0 },
       }),
-    }, provider, Boolean(server));
+    });
     if (typeof result?.content !== "string" || !result.content.trim() ||
       typeof result.model !== "string" || !result.model.trim()) {
-      throw new Error("POST returned an invalid inference response; expected nonempty content and model.");
+      throw publicError("POST returned an invalid inference response; expected nonempty content and model.");
     }
     console.log(`Smoke test passed (${Date.now() - started}ms).`);
-    console.log(`Model: ${result.model}`);
-    console.log(`Response: ${result.content.trim()}`);
+    const redact = (value) => value.replaceAll(appSecret, "[redacted]").replaceAll(providerKey, "[redacted]");
+    console.log(`Model: ${redact(result.model)}`);
+    console.log(`Response: ${redact(result.content.trim())}`);
   } finally {
     if (server) {
       await new Promise((resolve) => {
@@ -139,7 +182,7 @@ async function main() {
 main().catch((error) => {
   const message = error?.name === "TimeoutError" ? `Request timed out after ${smokeTimeoutMs() / 1000} seconds.`
     : error?.message === "fetch failed" ? "Could not reach the endpoint. Check --url and whether its server is running."
-      : error.message;
+      : error?.safeToPrint ? error.message : "Request failed. Check endpoint connectivity and credentials.";
   console.error(`Smoke test failed: ${message}`);
   process.exitCode = 1;
 });
