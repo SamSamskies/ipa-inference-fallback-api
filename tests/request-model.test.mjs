@@ -5,12 +5,13 @@ import handler from "../api/inference.js";
 import { clientQuota } from "../lib/client-quota.js";
 
 const providerIds = ["ollama", "gemini", "replit"];
-const envNames = ["TRENDINGNOSTR_APP_SECRET", "INFERENCE_FALLBACK_ENABLED", "DEFAULT_INFERENCE_PROVIDER",
+const envNames = ["REPLIT_MAX_TOKENS", "TRENDINGNOSTR_APP_SECRET", "INFERENCE_FALLBACK_ENABLED", "DEFAULT_INFERENCE_PROVIDER",
   ...providerIds.flatMap((id) => [`${id.toUpperCase()}_API_KEY`, `${id.toUpperCase()}_MODEL`])];
 const originalFetch = globalThis.fetch;
 let previous;
 beforeEach(() => {
   previous = envNames.map((name) => process.env[name]);
+  delete process.env.REPLIT_MAX_TOKENS;
   process.env.INFERENCE_FALLBACK_ENABLED = "true";
   delete process.env.DEFAULT_INFERENCE_PROVIDER;
   for (const id of providerIds) {

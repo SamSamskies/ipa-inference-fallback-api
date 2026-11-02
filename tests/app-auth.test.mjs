@@ -9,7 +9,7 @@ import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 const secondSecret = "private-second-app-secret";
 const ids = ["trendingnostr", "advancednostrsearch"];
 const providerIds = ["ollama", "gemini", "replit"];
-const envNames = [...appEnvNames(), "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
+const envNames = ["REPLIT_MAX_TOKENS", ...appEnvNames(), "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT",
   ...providerIds.flatMap((id) => [`${id.toUpperCase()}_API_KEY`, ...ids.map((app) => `${app.toUpperCase()}_${id.toUpperCase()}_API_KEY`)])];
 const originalFetch = globalThis.fetch;
 let previous;

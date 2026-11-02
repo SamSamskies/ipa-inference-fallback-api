@@ -6,7 +6,7 @@ import handler from "../api/inference.js";
 import { providers } from "../lib/providers/registry.js";
 import { requestTimeoutMs, smokeTimeoutMs } from "../lib/timeouts.js";
 
-const envNames = ["TRENDINGNOSTR_APP_SECRET", "INFERENCE_REQUEST_TIMEOUT_MS", "INFERENCE_FALLBACK_ENABLED",
+const envNames = ["REPLIT_MAX_TOKENS", "TRENDINGNOSTR_APP_SECRET", "INFERENCE_REQUEST_TIMEOUT_MS", "INFERENCE_FALLBACK_ENABLED",
   "INFERENCE_CLIENT_DAILY_LIMIT", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY"];
 const originalFetch = globalThis.fetch;
 let previous;

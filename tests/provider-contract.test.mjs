@@ -196,6 +196,7 @@ for (const [id, adapter] of Object.entries(providers)) {
   });
 
   test(`${id} endpoint applies server model capability restrictions before image fetching and generation`, async () => {
+    delete process.env.REPLIT_MAX_TOKENS;
     const model = "restricted-model";
     adapter.models[model] = { vision: false, webSearch: false, reasoning: false };
     delete process.env.INFERENCE_FALLBACK_ENABLED;

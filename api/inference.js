@@ -9,6 +9,7 @@ import { applyCapabilities, MAX_BODY_BYTES, normalizeModel, normalizeRequest } f
 import { prepareRequestImages } from "../lib/inference-images.js";
 import { sendInferenceError, withSources } from "../lib/inference-response.js";
 import { requestTimeoutMs } from "../lib/timeouts.js";
+import { replitMaxTokens } from "../lib/replit-limits.js";
 import { applyCors, INFERENCE_CLIENT_HEADER, originAllowed } from "../lib/http.js";
 
 // Preserve the existing DNS test seam while image handling lives in a shared helper.
@@ -18,6 +19,7 @@ const DEFAULT_CLIENT_DAILY = 50;
 loadLocalEnvFallback([
   "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "INFERENCE_REQUEST_TIMEOUT_MS",
   "OLLAMA_REQUESTS_PER_MINUTE", "OLLAMA_CLIENT_REQUESTS_PER_MINUTE", "OLLAMA_MAX_CONCURRENT",
+  "REPLIT_MAX_TOKENS",
   ...appEnvNames(),
 ], { exact: true });
 
@@ -78,14 +80,16 @@ export default async function handler(req, res) {
 
   let selected;
   let apiKey;
+  let maxTokens;
   try {
     selected = resolveAppProviderConfig(appId, providerId);
     apiKey = requestProviderKey(req);
+    if (providerId === "replit") maxTokens = replitMaxTokens();
   } catch (error) {
     sendInferenceError(res, error);
     return;
   }
-  const { adapter, maxTokens } = selected;
+  const { adapter } = selected;
 
   if (req.headers.origin && !originAllowed(req)) {
     res.status(403).json({ error: "forbidden_origin" });

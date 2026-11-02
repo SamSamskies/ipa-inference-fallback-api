@@ -14,7 +14,7 @@ const VISION_HINT = "The first user message includes the note's images before th
 const messages = [{ role: "system", content: "Respond in Spanish unless the user requests another language." },
   { role: "user", content: "Hello" }, { role: "assistant", content: "Hola" },
   { role: "user", content: "Reply in French." }];
-const envNames = ["TRENDINGNOSTR_APP_SECRET",  "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "TRENDINGNOSTR_REPLIT_MAX_TOKENS",
+const envNames = ["TRENDINGNOSTR_APP_SECRET",  "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "REPLIT_MAX_TOKENS",
   "REPLIT_MODEL", "OLLAMA_MODEL", "GEMINI_MODEL", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY"];
 const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
@@ -74,7 +74,7 @@ test("Replit sends native chat, reasoning and temperature to the fixed gateway",
     assert.equal(init.redirect,"error");
     assert.ok(init.signal instanceof AbortSignal);
     assert.deepEqual(JSON.parse(init.body),{model:MODEL,messages,stream:false,
-      reasoning_effort:"none",temperature:0});
+      max_tokens:16384,reasoning_effort:"none",temperature:0});
     return success();
   };
   const response=await call({body:{messages,webSearch:false,options:{reasoningEffort:"none",temperature:0}}});
@@ -95,10 +95,10 @@ test("requested Replit models override legacy env settings while gateway model I
   assert.equal(response.body.model,"actual/model");
 });
 
-test("Replit leaves the completion budget to the gateway unless configured server-side", async () => {
-  for (const [configured, expected] of [[undefined,undefined],["4096",4096],["8192",8192],]) {
-    if (configured === undefined) delete process.env.TRENDINGNOSTR_REPLIT_MAX_TOKENS;
-    else process.env.TRENDINGNOSTR_REPLIT_MAX_TOKENS = configured;
+test("Replit always sends the service completion cap and ignores caller caps", async () => {
+  for (const [configured, expected] of [[undefined,16384],["",16384],["4096",4096],["8192",8192]]) {
+    if (configured === undefined) delete process.env.REPLIT_MAX_TOKENS;
+    else process.env.REPLIT_MAX_TOKENS = configured;
     globalThis.fetch = async (_url,init) => {
       assert.equal(JSON.parse(init.body).max_tokens,expected);
       return success();

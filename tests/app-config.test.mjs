@@ -21,7 +21,7 @@ function rejectsWith(fn, code, status) {
 
 test("both apps allow three providers with no stored provider credentials or defaults", () => {
   validateAppRegistry(apps);
-  const resolve = createAppConfigResolver(apps, {});
+  const resolve = createAppConfigResolver(apps);
   for (const id of ["trendingnostr", "advancednostrsearch"]) {
     assert.equal(getApp(id), apps[id]);
     assert.equal(apps[id].enabled, true);
@@ -33,11 +33,13 @@ test("both apps allow three providers with no stored provider credentials or def
       assert.equal(result.adapter.id, provider);
       assert.equal(Object.hasOwn(result, "apiKey"), false);
       assert.equal(Object.hasOwn(result, "model"), false);
+      assert.equal(Object.hasOwn(result, "maxTokens"), false);
+      assert.equal(Object.hasOwn(apps[id].providers[provider], "maxTokensEnv"), false);
       assert.equal(Object.hasOwn(apps[id].providers[provider], "apiKeyEnv"), false);
     }
   }
   assert.equal(typeof resolveAppProviderConfig, "function");
-  assert.ok(appEnvNames().every((name) => !/API_KEY|MODEL/.test(name)));
+  assert.ok(appEnvNames().every((name) => !/API_KEY|MODEL|MAX_TOKENS/.test(name)));
   for (const id of ["unknown", "toString", "constructor", "__proto__", undefined]) assert.equal(getApp(id), undefined);
   assert.throws(() => { apps.trendingnostr.providers.replit.enabled = false; }, TypeError);
 });
@@ -47,7 +49,7 @@ test("unknown/disabled apps and disallowed/disabled providers fail closed", () =
   registry.advancednostrsearch.enabled = false;
   delete registry.trendingnostr.providers.gemini;
   registry.trendingnostr.providers.ollama.enabled = false;
-  const resolve = createAppConfigResolver(registry, {});
+  const resolve = createAppConfigResolver(registry);
   for (const id of [undefined, "unknown", "constructor", "__proto__", []]) rejectsWith(() => resolve(id), "unknown_app", 403);
   rejectsWith(() => resolve("advancednostrsearch", "replit"), "app_disabled", 403);
   rejectsWith(() => resolve("trendingnostr", "gemini"), "provider_not_allowed", 403);
@@ -57,17 +59,6 @@ test("unknown/disabled apps and disallowed/disabled providers fail closed", () =
   }
   registry.trendingnostr.providers.replit.enabled = false;
   assert.equal(resolve("trendingnostr", " REPLIT ").providerId, "replit");
-});
-
-test("Replit completion caps are app-scoped and validated without global fallback", () => {
-  const env = { REPLIT_MAX_TOKENS: "9999", TRENDINGNOSTR_REPLIT_MAX_TOKENS: "4096" };
-  const resolve = createAppConfigResolver(apps, env);
-  assert.equal(resolve("trendingnostr", "replit").maxTokens, 4096);
-  assert.equal(resolve("advancednostrsearch", "replit").maxTokens, undefined);
-  for (const value of ["0", "-1", "0.5", "1.5", "no", "Infinity", "9007199254740992", "1e3"]) {
-    env.TRENDINGNOSTR_REPLIT_MAX_TOKENS = value;
-    rejectsWith(() => resolve("trendingnostr", "replit"), "invalid_app_config", 503);
-  }
 });
 
 test("invalid app metadata and duplicate environment names are rejected", () => {
@@ -81,11 +72,9 @@ test("invalid app metadata and duplicate environment names are rejected", () => 
     (r) => { r.trendingnostr.providers.replit.enabled = "false"; },
     (r) => { r.trendingnostr.authSecretEnv = "private-secret"; },
     (r) => { r.trendingnostr.authSecretEnv = r.advancednostrsearch.authSecretEnv; },
-    (r) => { r.trendingnostr.providers.replit.maxTokensEnv = r.trendingnostr.authSecretEnv; },
-    (r) => { r.trendingnostr.providers.ollama.maxTokensEnv = "OLLAMA_CAP"; },
   ]) {
     const registry = structuredClone(apps); mutate(registry);
-    rejectsWith(() => createAppConfigResolver(registry, {}), "invalid_app_config", 503);
+    rejectsWith(() => createAppConfigResolver(registry), "invalid_app_config", 503);
   }
   for (const registry of [null, [], "invalid"]) rejectsWith(() => validateAppRegistry(registry), "invalid_app_config", 503);
 });
@@ -93,13 +82,14 @@ test("invalid app metadata and duplicate environment names are rejected", () => 
 test("local env loading includes all app secrets/settings and preserves injected values", () => {
   const directory = mkdtempSync(join(tmpdir(), "ipa-app-env-"));
   try {
-    writeFileSync(join(directory, ".env.local"), appEnvNames().map((name) => `${name}=local-value`).join("\n") + "\nOLLAMA_API_KEY=private-old-key\nGEMINI_API_KEY=private-old-key\nREPLIT_API_KEY=private-old-key\nINFERENCE_SMOKE_PROVIDER_KEY=private-caller-key");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !appEnvNames().includes(name) && !/API_KEY$|INFERENCE_SMOKE_PROVIDER_KEY/.test(name)));
+    writeFileSync(join(directory, ".env.local"), appEnvNames().map((name) => `${name}=local-value`).join("\n") + "\nOLLAMA_API_KEY=private-old-key\nGEMINI_API_KEY=private-old-key\nREPLIT_API_KEY=private-old-key\nINFERENCE_SMOKE_PROVIDER_KEY=private-caller-key\nREPLIT_MAX_TOKENS=24576\nTRENDINGNOSTR_REPLIT_MAX_TOKENS=1\nADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS=2");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !appEnvNames().includes(name) && !/API_KEY$|INFERENCE_SMOKE_PROVIDER_KEY|REPLIT_MAX_TOKENS$/.test(name)));
     env.TRENDINGNOSTR_APP_SECRET = "injected-value";
     const script = `
       await import(${JSON.stringify(new URL("../api/inference.js", import.meta.url).href)});
       const { appEnvNames } = await import(${JSON.stringify(new URL("../lib/apps.js", import.meta.url).href)});
-      for (const name of ["OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY", "INFERENCE_SMOKE_PROVIDER_KEY"]) {
+      if (process.env.REPLIT_MAX_TOKENS !== "24576") process.exit(3);
+      for (const name of ["TRENDINGNOSTR_REPLIT_MAX_TOKENS", "ADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY", "INFERENCE_SMOKE_PROVIDER_KEY"]) {
         if (process.env[name] !== undefined) process.exit(2);
       }
       for (const name of appEnvNames()) {

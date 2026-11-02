@@ -9,7 +9,8 @@ Every GET probe and POST inference request must authenticate a registered app.
 The app backend supplies the provider, model, and provider API key for each
 inference request. Provider credentials are owned by the calling backends and
 are never resolved from shared-service environment settings or another request.
-The registry stores app identity, allowed providers, and optional completion caps.
+The registry stores app identity and allowed providers. Service policy owns
+provider limits, including the Replit completion cap.
 
 ## Local development
 
@@ -28,9 +29,9 @@ Use the **Other** framework preset with no frontend build or development command
 Secrets belong in ignored local environment files or server-side environment
 settings. The shared service's local loader reads only its exact settings:
 `INFERENCE_FALLBACK_ENABLED`, `INFERENCE_CLIENT_DAILY_LIMIT`,
-`INFERENCE_REQUEST_TIMEOUT_MS`, the three `OLLAMA_` limits, and the app secret/cap
-names registered in `lib/apps.js`. It fills missing settings from `.env.local`
-then `.env` without overriding nonempty injected values. It does not load provider
+`INFERENCE_REQUEST_TIMEOUT_MS`, the three `OLLAMA_` limits, `REPLIT_MAX_TOKENS`,
+and the app secret names registered in `lib/apps.js`. It fills missing settings
+from `.env.local` then `.env` without overriding nonempty injected values. It does not load provider
 API keys, smoke caller keys, or obsolete provider/model defaults.
 
 `vercel.json` requests a [180 second function duration](https://vercel.com/docs/functions/configuring-functions/duration).
@@ -142,22 +143,32 @@ exits nonzero on failures. Its timeout is the configured request budget plus
 | `OLLAMA_MAX_CONCURRENT` | 2 active explanations across apps |
 | `TRENDINGNOSTR_APP_SECRET` | Required to authenticate TrendingNostr |
 | `ADVANCEDNOSTRSEARCH_APP_SECRET` | Required to authenticate AdvancedNostrSearch |
-| `TRENDINGNOSTR_REPLIT_MAX_TOKENS` | Optional positive decimal safe-integer completion cap, including reasoning |
-| `ADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS` | Optional positive decimal safe-integer completion cap, including reasoning |
+| `REPLIT_MAX_TOKENS` | 16,384 total completion tokens for every Replit request, including reasoning and the final answer; service-owned positive decimal safe integer |
 
-Blank app completion caps leave the budget to the gateway. Invalid nonblank caps
-return `503 invalid_app_config`. Other numeric limits retain their existing
-positive-integer/default behavior. Rate limits remain in memory per process;
+Replit always receives a completion cap: absent or blank `REPLIT_MAX_TOKENS` uses
+16,384. Invalid nonblank settings return `503 invalid_provider_config` for Replit
+probes and inference requests before quota reservation or upstream work; other
+providers are unaffected. Registered apps cannot override the cap through body,
+options, or query fields (`max_tokens`, `maxTokens`, and `max_completion_tokens`
+are ignored). Old app-specific cap settings are unused.
+
+The cap includes reasoning and visible answer tokens. The default is service
+policy, not a guarantee that every chosen model supports that value or finishes
+its answer within it. Verify the configured models with live smoke tests before
+rollout and tune the service setting as needed. Other numeric limits retain
+their existing positive-integer/default behavior. Rate limits remain in memory
+per process;
 Vercel instances do not share quota or concurrency state. Distributed limits and
 spend safeguards remain in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
 
 There are no shared provider/model defaults or stored provider-key settings.
 Before rolling out, move provider credentials into the appropriate app backends
 and configure their authenticated proxies. Remove obsolete global and app-scoped
-`*_API_KEY`, `*_MODEL`, `DEFAULT_INFERENCE_PROVIDER`, and `REPLIT_MAX_TOKENS` settings
-from the shared deployment and local service configuration after migration.
+`*_API_KEY`, `*_MODEL`, `DEFAULT_INFERENCE_PROVIDER`, and app-specific
+`*_REPLIT_MAX_TOKENS` settings from the shared deployment and local service
+configuration after migration.
 Existing stored secrets are not deleted by this source change. App secrets and
-app-scoped completion caps remain shared-service settings.
+the service-wide `REPLIT_MAX_TOKENS` remain shared-service settings.
 
 The shared service handles provider keys transiently, so a running-service
 compromise could still capture keys in active requests. Application logs omit raw
@@ -170,12 +181,12 @@ successful responses are redacted too.
 
 `lib/apps.js` registers TrendingNostr and AdvancedNostrSearch, both allowing
 Ollama, Gemini, and Replit. Entries contain `name`, boolean `enabled`,
-`authSecretEnv`, and a provider allowlist with optional `enabled` and Replit
-`maxTokensEnv` settings. The immutable registry contains no provider credentials,
-provider-key environment names, model settings, or default provider.
+`authSecretEnv`, and a provider allowlist with optional `enabled` settings.
+The immutable registry contains no provider credentials, provider-key environment
+names, model settings, default provider, or token-limit settings.
 
 `resolveAppProviderConfig(appId, providerId)` resolves a trusted app/provider into
-`{ appId, providerId, adapter, maxTokens? }`. `authenticateApp(req)` verifies the
+`{ appId, providerId, adapter }`. `authenticateApp(req)` verifies the
 request identity before the HTTP handler calls it. Unknown/disabled apps are
 rejected by authentication; disallowed providers return `403 provider_not_allowed`
 and disabled providers return `503 provider_disabled`.
@@ -183,8 +194,8 @@ and disabled providers return `503 provider_disabled`.
 To onboard another app:
 
 1. Add its unique lowercase ID, metadata, unique `authSecretEnv`, and explicit
-   provider allowlist in `lib/apps.js`. Give any optional cap environment variables
-   a unique app prefix. Registered environment names are loaded locally automatically.
+   provider allowlist in `lib/apps.js`. Registered app secret names are loaded
+   locally automatically.
 2. Generate a separate app secret with `npm run --silent generate:app-secret`.
    Configure it in the shared service and that app's backend. The command prints
    a fresh 256-bit URL-safe value and does not write configuration files.
@@ -208,9 +219,10 @@ or stored-secret cleanup is performed by these source changes.
 `lib/providers/registry.js` is the static allowlist for Ollama, Gemini, and Replit.
 Each entry describes its capabilities and
 `generate(normalizedRequest, { model, apiKey, signal, maxTokens? })` function.
-The app resolver supplies optional app completion caps; the handler supplies the
-validated request model and request-local provider key explicitly. Replit's
-optional completion budget is passed as `maxTokens`.
+The app resolver supplies the allowed adapter; the handler supplies the validated
+request model and request-local provider key explicitly. `lib/replit-limits.js`
+resolves the mandatory service-owned Replit cap, which the handler passes as
+`maxTokens`. Adapters continue to receive their configuration explicitly.
 
 The shared request format has `system`, `messages`, `options`, and `webSearch`.
 Messages use `user`/`assistant` roles and `parts` containing `{ text }` or
@@ -326,7 +338,7 @@ their existing JSON shape and codes:
 | 413 | `payload_too_large` |
 | 429 | `client_limit`, `client_capacity`, `rate_limited`, `quota_exhausted`, `search_quota` |
 | 502 | `provider_error`, Ollama/Replit `model_unavailable`, Ollama/Replit `provider_auth` |
-| 503 | `disabled`, `provider_disabled`, `invalid_app_config`, `provider_busy` |
+| 503 | `disabled`, `provider_disabled`, `invalid_app_config`, `invalid_provider_config`, `provider_busy` |
 
 Ollama rate limits/cooldowns, Replit gateway rate limits, and Gemini 429s retain `Retry-After`;
 Replit maps insufficient-credit responses to `quota_exhausted`. Gemini quota classification

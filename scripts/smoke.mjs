@@ -23,7 +23,7 @@ Runs a configuration probe and a short generation with web search disabled.
 `;
 
 const PUBLIC_ERRORS = new Set([
-  "unauthorized_app", "invalid_app_config", "provider_not_allowed", "provider_disabled",
+  "unauthorized_app", "invalid_app_config", "invalid_provider_config", "provider_not_allowed", "provider_disabled",
   "missing_api_key", "invalid_api_key", "disabled", "invalid_provider", "invalid_model",
   "invalid_json", "invalid_request", "missing_client_token", "forbidden_origin",
   "payload_too_large", "client_limit", "client_capacity", "rate_limited", "quota_exhausted",
