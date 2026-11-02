@@ -3,7 +3,8 @@
 A shared fallback inference endpoint for apps using the Inference Provider API
 (IPA). Apps retain IPA-first routing, prompts, consent, and their server-side
 proxies; this service supplies reusable Ollama Cloud, Gemini, and Replit adapters.
-It runs as Node ESM `/api/inference` and `/api/providers` functions with no runtime package dependencies.
+It runs as Node ESM `/api/inference` and `/api/providers` functions. The
+`@vercel/firewall` SDK supplies Vercel-backed app admission checks.
 
 Every GET probe, provider-discovery request, and POST inference request must authenticate a registered app.
 The app backend supplies the provider, model, and provider API key for each
@@ -29,7 +30,8 @@ Use the **Other** framework preset with no frontend build or development command
 Secrets belong in ignored local environment files or server-side environment
 settings. The shared service's local loader reads only its exact settings:
 `INFERENCE_FALLBACK_ENABLED`, `INFERENCE_CLIENT_DAILY_LIMIT`,
-`INFERENCE_REQUEST_TIMEOUT_MS`, the three `OLLAMA_` limits, `REPLIT_MAX_TOKENS`,
+`INFERENCE_REQUEST_TIMEOUT_MS`, `INFERENCE_RATE_LIMIT_WINDOW_SECONDS`,
+the three `OLLAMA_` limits, `REPLIT_MAX_TOKENS`,
 and the app secret names registered in `lib/apps.js`. It fills missing settings
 from `.env.local` then `.env` without overriding nonempty injected values. It does not load provider
 API keys, smoke caller keys, or obsolete provider/model defaults.
@@ -38,6 +40,14 @@ API keys, smoke caller keys, or obsolete provider/model defaults.
 Each request has a 120-second total timeout covering images, generation, search,
 and retries. `INFERENCE_REQUEST_TIMEOUT_MS` is capped at 170,000 ms. There is no
 frontend at `/`; use `/api/inference` through a server-side app proxy.
+
+Before deploying, publish the Vercel **`inference-app`** rate-limit rule using the
+[production controls runbook](docs/production-controls.md). Deployed POSTs fail
+closed if the check fails or its rule is missing. Local development skips the
+external check. Each authenticated app has its own admission bucket across its
+providers and browser IDs; Vercel's counters are shared across instances within
+a region. They are not exact global daily quotas. Configure public-proxy rate
+limits and provider spending controls separately as described in the runbook.
 
 ## Server-to-server requests
 
@@ -172,6 +182,7 @@ exits nonzero on failures. Its timeout is the configured request budget plus
 | `INFERENCE_FALLBACK_ENABLED` | Enabled unless `0`, `false`, or `off` |
 | `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per authenticated app + client token per UTC day, shared across that app's providers |
 | `INFERENCE_REQUEST_TIMEOUT_MS` | 120,000 ms; positive integer capped at 170,000 ms |
+| `INFERENCE_RATE_LIMIT_WINDOW_SECONDS` | 60; integer from 10–600, matching the published `inference-app` WAF window. Supplies conservative `Retry-After`; the dashboard owns the threshold/window |
 | `OLLAMA_REQUESTS_PER_MINUTE` | 20 upstream attempts across apps/clients, including search/continuation calls |
 | `OLLAMA_CLIENT_REQUESTS_PER_MINUTE` | 5 explanation attempts per app + client token |
 | `OLLAMA_MAX_CONCURRENT` | 2 active explanations across apps |
@@ -192,9 +203,14 @@ An explicit cap includes reasoning and visible answer tokens. Choose a value
 supported by the configured models and verify it with live smoke tests. Without
 an override, output limits follow the gateway/upstream behavior; this service
 does not assume the gateway has explicit per-model defaults. Other numeric limits
-retain their existing positive-integer/default behavior. Rate limits remain in
-memory per process; Vercel instances do not share quota or concurrency state. Distributed limits and
-spend safeguards remain in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+retain their existing positive-integer/default behavior. The client daily
+allowance and Ollama limits/cooldowns remain in memory per process; Vercel
+instances do not share those counters. The Vercel admission check adds a separate
+per-app request budget across instances within a region. It counts admitted
+POSTs, including later failures, and is never refunded. Exact daily accounting
+and global budgets remain deferred in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+See [production controls](docs/production-controls.md) for WAF setup, provider
+spending safeguards, public-proxy controls, emergency shutdown, and rotation.
 
 There are no shared provider/model defaults or stored provider-key settings.
 Before rolling out, move provider credentials into the appropriate app backends
@@ -237,7 +253,8 @@ To onboard another app:
 3. Store provider keys only in that app's backend. Have its proxy authenticate,
    set the provider-key header, provider query parameter, and model body field,
    and preserve upstream status codes and `Retry-After` for its browser client.
-4. Run `npm test` and an authenticated smoke request before rollout.
+4. Follow the production controls runbook, run `npm test`, and validate the
+   admission rule and an authenticated smoke request before rollout.
 
 Rotate provider keys in their owning backend; the next request uses the new key
 without a shared-service configuration change. Coordinate app-secret rotation
@@ -246,7 +263,7 @@ secret per app. Browser bundles must never contain app secrets or provider keys.
 
 This implements the registry from [issue #4](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/4)
 and the authentication/routing portion of [issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5).
-Provider discovery and frontend migrations remain separate work; no deployment
+Frontend migrations remain separate work; no deployment
 or stored-secret cleanup is performed by these source changes.
 
 ## Provider adapters
@@ -337,8 +354,8 @@ The conversation must start and end with a usable user turn (excluding system
 messages). Text content may also be an array of `{ "type": "text", "text": "..." }`
 and `{ "type": "image", "url": "https://..." }` or
 `{ "type": "image", "mediaType": "image/png", "data": "base64..." }` parts.
-Supported image types are JPEG, PNG, WebP, and GIF. Request body and prompt caps
-remain 100,000 and 60,000 respectively using the existing length checks; fetched
+Supported image types are JPEG, PNG, WebP, and GIF. The serialized request body is
+capped at 100,000 UTF-8 bytes and prompt text at 60,000 characters; fetched
 images are capped at 4,000,000 bytes each, and the total inline image payload
 after fetch cannot exceed 4,000,000 bytes (`413 payload_too_large`). Image fetches reject private/local
 destinations and credentials, validate all DNS answers and redirect hops, and pin
@@ -395,12 +412,17 @@ plus the capability/image errors described above:
 | 413 | `payload_too_large` |
 | 429 | `client_limit`, `client_capacity`, `rate_limited`, `quota_exhausted`, `search_quota` |
 | 502 | `provider_error`, Ollama/Replit `model_unavailable`, Ollama/Replit `provider_auth` |
-| 503 | `disabled`, `provider_disabled`, `invalid_app_config`, `invalid_provider_config`, `provider_busy` |
+| 503 | `disabled`, `provider_disabled`, `invalid_app_config`, `invalid_provider_config`, `provider_busy`, `rate_limit_unavailable` |
 
 Ollama rate limits/cooldowns, Replit gateway rate limits, and Gemini 429s retain `Retry-After`;
 Replit maps insufficient-credit responses to `quota_exhausted`. Gemini quota classification
 distinguishes search, daily, and short-window limits. Provider failures release
 the daily success allowance, while Ollama attempt limits still count failures.
+Vercel admission limits return `429 rate_limited` with one full configured WAF
+window as `Retry-After`; check/configuration failures return
+`503 rate_limit_unavailable` with `Retry-After: 5`. GET probes and discovery do not
+check or consume this budget. The existing daily success allowance remains
+process-local; it is not a reliable deployment-wide browser quota.
 
 Application prompt builders, language choice, local-time context, IPA-first
 routing, and user consent remain in the frontends. This API forwards supplied
@@ -420,5 +442,7 @@ timeouts, limits and `Retry-After`, bounded search, images/SSRF/redirects, reaso
 language instruction forwarding, Gemini capacity/quota handling, malformed
 provider replies, provider/model/auth failures, and required provider/model
 selection, app authentication, request-local credential isolation, duplicate-header
-rejection, error redaction, and app-scoped client quotas. Live generation is a separate,
-credentialed check.
+rejection, error redaction, app-scoped client quotas, Vercel admission failure
+handling and app isolation using a shared mock counter service, and the SDK's
+outbound headers/timeout. Published WAF rules and provider spending controls
+require separate rollout validation; live generation is a separate, credentialed check.
