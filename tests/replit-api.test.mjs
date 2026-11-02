@@ -14,7 +14,7 @@ const VISION_HINT = "The first user message includes the note's images before th
 const messages = [{ role: "system", content: "Respond in Spanish unless the user requests another language." },
   { role: "user", content: "Hello" }, { role: "assistant", content: "Hola" },
   { role: "user", content: "Reply in French." }];
-const envNames = ["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "REPLIT_MAX_TOKENS",
+const envNames = [ "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "REPLIT_MAX_TOKENS",
   "REPLIT_MODEL", "OLLAMA_MODEL", "GEMINI_MODEL", ...Object.values(PROVIDER_CONFIG).map(({keyEnv}) => keyEnv)];
 const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
@@ -271,8 +271,7 @@ test("shared unread image fallback becomes text in Replit instead of an empty co
   }]);
 });
 
-test("Replit can be the default while concurrent requests keep three providers separate", async () => {
-  process.env.DEFAULT_INFERENCE_PROVIDER="replit";
+test("explicit concurrent requests keep all three providers separate", async () => {
   process.env.OLLAMA_API_KEY="test-ollama-key";process.env.OLLAMA_MODEL="ollama-model";
   process.env.GEMINI_API_KEY="test-gemini-key";process.env.GEMINI_MODEL="gemini-model";
   process.env.REPLIT_MODEL="replit-model";
@@ -290,28 +289,10 @@ test("Replit can be the default while concurrent requests keep three providers s
     return Response.json({candidates:[{content:{parts:[{text:"Gemini"}]}}]});
   };
   const responses=await Promise.all([
-    call({url:"/api/inference",body:{model:"replit-model",messages,webSearch:false}}),
+    call({url:"/api/inference?provider=replit",body:{model:"replit-model",messages,webSearch:false}}),
     call({url:"/api/inference?provider=ollama",body:{model:"ollama-model",messages,webSearch:false}}),
     call({url:"/api/inference?provider=gemini",body:{model:"gemini-model",messages,webSearch:false}}),
   ]);
   assert.deepEqual(responses.map((res)=>res.statusCode),[200,200,200]);
   assert.deepEqual(responses.map((res)=>res.body.model),["replit-model","ollama-model","gemini-model"]);
-});
-
-test("an unset or blank default selects Replit without using another provider's key", async () => {
-  for (const value of [undefined, "", "  "]) {
-    if (value === undefined) delete process.env.DEFAULT_INFERENCE_PROVIDER;
-    else process.env.DEFAULT_INFERENCE_PROVIDER = value;
-    globalThis.fetch = async (url, init) => {
-      assert.equal(url, URL);
-      assert.equal(init.headers.Authorization, "Bearer test-replit-key");
-      return success();
-    };
-    assert.equal((await call({ url: "/api/inference", method: "GET" })).statusCode, 200);
-    assert.equal((await call({ url: "/api/inference" })).statusCode, 200);
-  }
-  delete process.env.REPLIT_API_KEY;
-  process.env.OLLAMA_API_KEY = "other-provider-key";
-  process.env.GEMINI_API_KEY = "other-provider-key";
-  assert.equal((await call({ url: "/api/inference" })).body.error, "missing_api_key");
 });

@@ -6,10 +6,10 @@ import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 import { smokeTimeoutMs } from "../lib/timeouts.js";
 import { normalizeModel } from "../lib/inference-request.js";
 
-const HELP = `Usage: npm run smoke -- --model MODEL [--provider ${Object.keys(PROVIDER_CONFIG).join("|")}] [--url ENDPOINT]
+const HELP = `Usage: npm run smoke -- --provider ${Object.keys(PROVIDER_CONFIG).join("|")} --model MODEL [--url ENDPOINT]
 
 By default, start a temporary local server using keys from .env.local.
-Omit --provider to use DEFAULT_INFERENCE_PROVIDER (otherwise replit).
+--provider is required and is sent in the query parameter.
 --model is required and is sent in the inference request body.
 Use --url to test an existing /api/inference endpoint with its own server keys.
 Runs a configuration probe and a short generation with web search disabled.
@@ -70,12 +70,9 @@ async function main() {
     console.log(HELP);
     return;
   }
-  const provider = values.provider !== undefined
-    ? values.provider.trim().toLowerCase()
-    : process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "replit";
-  if ((values.provider !== undefined || values.url === undefined) &&
-    !Object.hasOwn(PROVIDER_CONFIG, provider)) {
-    throw new Error(`Choose --provider ${Object.keys(PROVIDER_CONFIG).join(", ")}.`);
+  const provider = values.provider?.trim().toLowerCase();
+  if (!Object.hasOwn(PROVIDER_CONFIG, provider)) {
+    throw new Error(`--provider is required: choose ${Object.keys(PROVIDER_CONFIG).join(", ")}.`);
   }
   let model;
   try {
@@ -100,7 +97,7 @@ async function main() {
       server = await startLocalServer();
       url = new URL(`http://127.0.0.1:${server.address().port}/api/inference`);
     }
-    if (values.provider !== undefined) url.searchParams.set("provider", provider);
+    url.searchParams.set("provider", provider);
 
     const signal = AbortSignal.timeout(smokeTimeoutMs());
     const started = Date.now();

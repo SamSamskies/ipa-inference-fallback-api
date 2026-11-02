@@ -35,14 +35,15 @@ function rejectsWith(fn, code, status) {
   });
 }
 
-test("both registered apps allow all three providers and default to Replit", () => {
+test("both registered apps allow all three providers without defaults", () => {
   assert.doesNotThrow(() => validateAppRegistry(apps));
   for (const id of appIds) {
     assert.equal(getApp(id), apps[id]);
     assert.equal(apps[id].enabled, true);
     assert.deepEqual(Object.keys(apps[id].providers), providerIds);
     const resolve = createAppConfigResolver(apps, environment());
-    assert.equal(resolve(id).providerId, "replit");
+    assert.equal(Object.hasOwn(apps[id], "defaultProvider"), false);
+    rejectsWith(() => resolve(id), "invalid_provider", 400);
     for (const providerId of providerIds) {
       assert.equal(resolve(id, providerId).providerId, providerId);
     }
@@ -100,7 +101,6 @@ test("missing app/provider keys never use another app, provider, app secret, or 
       assert.equal(resolve(other, providerId).appId, other);
       const otherProvider = providerIds.find((candidate) => candidate !== providerId);
       assert.equal(resolve(id, otherProvider).providerId, otherProvider);
-      if (providerId === "replit") rejectsWith(() => resolve(id), "missing_api_key", 503);
     }
   }
 });
@@ -117,12 +117,12 @@ test("unknown/disabled apps and providers outside the app allowlist fail closed"
   rejectsWith(() => resolve("advancednostrsearch"), "app_disabled", 403);
   rejectsWith(() => resolve("trendingnostr", "gemini"), "provider_not_allowed", 403);
   rejectsWith(() => resolve("trendingnostr", "ollama"), "provider_disabled", 503);
-  for (const providerId of ["", " ", "unknown", "constructor", "__proto__", null, []]) {
+  for (const providerId of [undefined, "", " ", "unknown", "constructor", "__proto__", null, []]) {
     rejectsWith(() => resolve("trendingnostr", providerId), "invalid_provider", 400);
   }
   assert.equal(resolve("trendingnostr", " REPLIT ").providerId, "replit");
   registry.trendingnostr.providers.replit.apiKeyEnv = "REPLIT_API_KEY";
-  assert.equal(resolve("trendingnostr").apiKey, "private-trendingnostr-replit-key");
+  assert.equal(resolve("trendingnostr", "replit").apiKey, "private-trendingnostr-replit-key");
 });
 
 test("app resolution contains only credentials and provider settings; models belong to requests", () => {
@@ -130,8 +130,8 @@ test("app resolution contains only credentials and provider settings; models bel
   env.REPLIT_MODEL = "ignored-global-model";
   env.TRENDINGNOSTR_REPLIT_MODEL = "ignored-app-model";
   const resolve = createAppConfigResolver(apps, env);
-  assert.equal(Object.hasOwn(resolve("trendingnostr"), "model"), false);
-  assert.equal(Object.hasOwn(resolve("trendingnostr"), "capabilities"), false);
+  assert.equal(Object.hasOwn(resolve("trendingnostr", "replit"), "model"), false);
+  assert.equal(Object.hasOwn(resolve("trendingnostr", "replit"), "capabilities"), false);
   assert.ok(appEnvNames().every((name) => !name.endsWith("_MODEL")));
   for (const app of Object.values(apps)) {
     for (const config of Object.values(app.providers)) {
@@ -146,19 +146,18 @@ test("Replit completion budgets are app-scoped and validated without global fall
   env.REPLIT_MAX_TOKENS = "9999";
   env.TRENDINGNOSTR_REPLIT_MAX_TOKENS = "4096";
   const resolve = createAppConfigResolver(apps, env);
-  assert.equal(resolve("trendingnostr").maxTokens, 4096);
-  assert.equal(resolve("advancednostrsearch").maxTokens, undefined);
+  assert.equal(resolve("trendingnostr", "replit").maxTokens, 4096);
+  assert.equal(resolve("advancednostrsearch", "replit").maxTokens, undefined);
   for (const invalid of ["0", "-1", "0.5", "1.5", "no", "Infinity", "9007199254740992", "1e3"]) {
     env.TRENDINGNOSTR_REPLIT_MAX_TOKENS = invalid;
-    rejectsWith(() => resolve("trendingnostr"), "invalid_app_config", 503);
+    rejectsWith(() => resolve("trendingnostr", "replit"), "invalid_app_config", 503);
   }
 });
 
-test("malformed registries reject invalid defaults, metadata, and reused environment names", () => {
+test("malformed registries reject invalid metadata and reused environment names", () => {
   for (const mutate of [
-    (r) => { r.trendingnostr.defaultProvider = "unknown"; },
-    (r) => { r.trendingnostr.defaultProvider = "constructor"; },
-    (r) => { r.trendingnostr.providers.replit.enabled = false; },
+    (r) => { r.trendingnostr.providers = null; },
+    (r) => { r.trendingnostr.providers.replit = null; },
     (r) => { r.trendingnostr.enabled = "true"; },
     (r) => { r.trendingnostr.name = " "; },
     (r) => { r.trendingnostr.providers = []; },

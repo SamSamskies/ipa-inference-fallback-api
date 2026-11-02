@@ -14,11 +14,7 @@ import { applyCors, INFERENCE_CLIENT_HEADER, originAllowed } from "../lib/http.j
 export { imageFetchDns } from "../lib/inference-images.js";
 
 const DEFAULT_CLIENT_DAILY = 50;
-loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_", ...appEnvNames()]);
-
-function defaultProviderId() {
-  return process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "replit";
-}
+loadLocalEnvFallback(["INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_", ...appEnvNames()]);
 
 function fallbackEnabled(apiKey) {
   const flag = (process.env.INFERENCE_FALLBACK_ENABLED ?? "").trim().toLowerCase();
@@ -53,15 +49,17 @@ export default async function handler(req, res) {
     return;
   }
 
+  if (req.method !== "GET" && req.method !== "POST") {
+    res.status(405).json({ error: "method_not_allowed" });
+    return;
+  }
+
   const requestedProviders = new URL(
     req.url || "/api/inference", "http://localhost"
   ).searchParams.getAll("provider");
-  const explicitProvider = requestedProviders.length > 0;
-  const providerId = explicitProvider
-    ? requestedProviders[0].trim().toLowerCase()
-    : defaultProviderId();
-  if (requestedProviders.length > 1 || !getProvider(providerId)) {
-    res.status(explicitProvider ? 400 : 503).json({ error: "invalid_provider" });
+  const providerId = requestedProviders[0]?.trim().toLowerCase();
+  if (requestedProviders.length !== 1 || !getProvider(providerId)) {
+    res.status(400).json({ error: "invalid_provider" });
     return;
   }
 
@@ -77,11 +75,6 @@ export default async function handler(req, res) {
       ok: false,
       error: apiKey ? "disabled" : "missing_api_key",
     });
-    return;
-  }
-
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "method_not_allowed" });
     return;
   }
 

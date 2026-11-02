@@ -16,7 +16,7 @@ function readJsonLines(path) {
 function run(args, scenario = "success", requestTimeout = "") {
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : scenario === "no_default" ? "" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=replit\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
@@ -94,7 +94,7 @@ function run(args, scenario = "success", requestTimeout = "") {
     const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
       !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|REPLIT_|NODE_OPTIONS)/.test(name)));
     const result = spawnSync(process.execPath, ["--import", mockPath, script, ...args], {
-      cwd: directory, env: { ...env, IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
+      cwd: directory, env: { ...env, DEFAULT_INFERENCE_PROVIDER: "replit", IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
     });
     assert.ifError(result.error);
     assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
@@ -114,11 +114,13 @@ test("smoke help and invalid arguments exit without a request", () => {
   assert.match(help.output, /--model MODEL/);
   assert.equal(help.requests.length, 0);
   for (const args of [[], ["--provider", "unknown"], ["--provider", ""], ["--unknown"],
-    ["--model", ""], ["--model", "  "], ["--model", "two models"],
-    ["--model", "x".repeat(201)],
-    ["--model", "model", "--url", "invalid"],
-    ["--model", "model", "--url", "file:///etc/passwd"],
-    ["--model", "model", "--url", "https://user:password@example.test"]]) {
+    ["--provider", "replit", "--model", ""], ["--provider", "replit", "--model", "  "],
+    ["--provider", "replit", "--model", "two models"],
+    ["--provider", "replit", "--model", "x".repeat(201)],
+    ["--provider", "replit", "--model", "model", "--url", "invalid"],
+    ["--provider", "replit", "--model", "model", "--url", "file:///etc/passwd"],
+    ["--provider", "replit", "--model", "model", "--url", "https://user:password@example.test"],
+    ["--provider", "unknown", "--model", "model", "--url", "https://smoke.example/api/inference"]]) {
     const result = run(args);
     assert.equal(result.status, 1);
     assert.equal(result.requests.length, 0);
@@ -126,7 +128,7 @@ test("smoke help and invalid arguments exit without a request", () => {
 });
 
 test("smoke requires a model even when legacy model environment variables are set", () => {
-  for (const args of [["--provider", "ollama"], ["--url", "https://smoke.example/api/inference"]]) {
+  for (const args of [["--provider", "ollama"], ["--provider", "replit", "--url", "https://smoke.example/api/inference"]]) {
     const result = run(args);
     assert.equal(result.status, 1);
     assert.match(result.output, /--model is required/);
@@ -139,7 +141,7 @@ test("smoke request models reach each selected provider without changing the env
     [["--provider", "ollama", "--model", "  custom:cloud  "], "ollama", "custom:cloud"],
     [["--provider", "gemini", "--model", "custom-gemini-model"], "gemini", "custom-gemini-model"],
     [["--provider", "replit", "--model", "custom/replit-model"], "replit", "custom/replit-model"],
-    [["--model", "default-provider-model"], "gemini", "default-provider-model"],
+    [["--provider", " REPLIT ", "--model", "backend/model"], "replit", "backend/model"],
   ]) {
     const result = run(args);
     assert.equal(result.status, 0, result.output);
@@ -148,10 +150,16 @@ test("smoke request models reach each selected provider without changing the env
   }
 });
 
-test("local smoke defaults to Replit when no default provider is configured", () => {
-  const result = run(["--model", "custom/replit-model"], "no_default");
-  assert.equal(result.status, 0, result.output);
-  assert.deepEqual(result.requests, [{ provider: "replit", model: "custom/replit-model" }]);
+test("smoke requires an explicit provider despite legacy defaults and URL parameters", () => {
+  for (const args of [
+    ["--model", "backend/model"],
+    ["--model", "backend/model", "--url", "https://smoke.example/api/inference?provider=replit"],
+  ]) {
+    const result = run(args);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /--provider is required/);
+    assert.equal(result.requests.length, 0);
+  }
 });
 
 test("remote smoke sends the model in the body for all providers without credentials", () => {
@@ -177,11 +185,12 @@ test("remote smoke sends the model in the body for all providers without credent
   }
 });
 
-test("smoke without a provider flag preserves the target's default selection", () => {
-  for (const scenario of ["success", "bad_local_default"]) {
-    const result = run(["--model", "backend/model", "--url", "https://smoke.example/api/inference"], scenario);
-    assert.equal(result.status, 0, result.output);
-    assert.ok(result.requests.every((request) => !new URL(request.url).searchParams.has("provider")));
+test("explicit smoke provider replaces all provider parameters in the remote URL", () => {
+  const result = run(["--provider", "gemini", "--model", "backend/model", "--url",
+    "https://smoke.example/api/inference?provider=ollama&provider=replit"]);
+  assert.equal(result.status, 0, result.output);
+  for (const request of result.requests) {
+    assert.deepEqual(new URL(request.url).searchParams.getAll("provider"), ["gemini"]);
   }
 });
 
@@ -211,7 +220,7 @@ test("smoke timeout tracks the local request budget plus 30 seconds", () => {
 });
 
 test("smoke timeout errors report the configured duration", () => {
-  const result = run(["--model","backend/model","--url","https://smoke.example/api/inference"],"timeout","1000");
+  const result = run(["--provider","replit","--model","backend/model","--url","https://smoke.example/api/inference"],"timeout","1000");
   assert.equal(result.status,1);
   assert.match(result.output,/Request timed out after 31 seconds/);
   assert.deepEqual(result.timeouts,[31_000]);

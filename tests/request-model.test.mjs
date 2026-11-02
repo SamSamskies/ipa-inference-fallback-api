@@ -34,14 +34,42 @@ async function call(provider, { method = "POST", body = { messages, webSearch: f
     setHeader(name, value) { this.headers[name] = value; },
     status(code) { this.statusCode = code; return this; },
     json(value) { this.body = value; },
+    end() { return this; },
   };
   await handler({
-    method, url: `/api/inference?provider=${provider}${query}`,
+    method, url: provider === undefined ? "/api/inference" : `/api/inference?provider=${provider}${query}`,
     headers: { host: "example.test", origin: "https://example.test", "x-inference-client": crypto.randomUUID() },
     body,
   }, res);
   return res;
 }
+
+test("GET and POST require an explicit provider despite legacy defaults or a body provider", async () => {
+  const quota = mock.method(clientQuota, "tryConsume", () => { throw new Error("Must select provider first"); });
+  for (const legacyDefault of [undefined, "", "replit", "ollama", "gemini", "invalid"]) {
+    if (legacyDefault === undefined) delete process.env.DEFAULT_INFERENCE_PROVIDER;
+    else process.env.DEFAULT_INFERENCE_PROVIDER = legacyDefault;
+    for (const method of ["GET", "POST"]) {
+      const res = await call(undefined, { method,
+        body: { provider: "replit", model: "backend/model", messages, webSearch: false },
+      });
+      assert.equal(res.statusCode, 400);
+      assert.deepEqual(res.body, { error: "invalid_provider" });
+    }
+  }
+  assert.equal(quota.mock.callCount(), 0);
+});
+
+test("CORS preflight needs no provider or model", async () => {
+  const res = await call(undefined, { method: "OPTIONS", body: undefined });
+  assert.equal(res.statusCode, 204);
+});
+
+test("unsupported HTTP methods remain method_not_allowed without a provider", async () => {
+  const res = await call(undefined, { method: "PUT" });
+  assert.equal(res.statusCode, 405);
+  assert.deepEqual(res.body, { error: "method_not_allowed" });
+});
 
 for (const provider of providerIds) {
   test(`${provider}: model is required in the body before quota or upstream work`, async () => {
