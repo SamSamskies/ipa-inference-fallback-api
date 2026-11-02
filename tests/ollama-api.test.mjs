@@ -77,6 +77,10 @@ async function call({ method = "POST", token = crypto.randomUUID(), body = { mes
     json(value) { this.body = value; return this; },
     end() { return this; },
   };
+  const provider = new URL(url, "http://localhost").searchParams.get("provider") || process.env.DEFAULT_INFERENCE_PROVIDER;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    body = { model: provider === "gemini" ? "gemini-test-model" : "gemma4:cloud", ...body };
+  }
   await handler({ method, url, headers: { host: "example.test", origin: "https://example.test", "x-inference-client": token }, body }, res);
   return res;
 }
@@ -122,20 +126,13 @@ test("provider selection rejects typos and honors the disable flag", async () =>
   assert.equal((await call()).body.error, "disabled");
 });
 
-test("configured Ollama model tags pass through and missing settings use the default", async () => {
-  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
-  process.env.OLLAMA_MODEL = "custom:cloud";
+test("requested Ollama model tags pass through without environment overrides", async () => {
+  process.env.OLLAMA_MODEL = "ignored-env-model";
   globalThis.fetch = async (_url, options) => {
     assert.equal(JSON.parse(options.body).model, "custom:cloud");
     return success();
   };
-  assert.equal((await call()).statusCode, 200);
-  delete process.env.OLLAMA_MODEL;
-  globalThis.fetch = async (_url, options) => {
-    assert.equal(JSON.parse(options.body).model, "gemma4:31b");
-    return success();
-  };
-  assert.equal((await call()).statusCode, 200);
+  assert.equal((await call({ body: { model: "custom:cloud", messages, webSearch: false } })).statusCode, 200);
 });
 
 test("requests use the configured default and can explicitly select either provider", async () => {
@@ -204,33 +201,20 @@ test("the fallback disable flag applies to both providers", async () => {
   }
 });
 
-test("providers use their own configured models or built-in defaults", async () => {
-  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
+test("models are supplied per request for both providers", async () => {
   process.env.GEMINI_API_KEY = "test-gemini-key";
-  process.env.GEMINI_MODEL = "gemini-custom-model";
-  globalThis.fetch = async (url, init) => {
-    if (String(url).startsWith("https://generativelanguage.googleapis.com/")) {
-      assert.match(url, /models\/gemini-custom-model:generateContent/);
-      return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
-    }
-    assert.equal(JSON.parse(init.body).model, "gemma4:31b");
-    return success();
-  };
-  assert.equal((await call()).statusCode, 200);
-  assert.equal((await call({ url: "/api/inference?provider=ollama" })).statusCode, 200);
-  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
-  process.env.OLLAMA_MODEL = "ollama-custom-model";
-  delete process.env.GEMINI_MODEL;
   globalThis.fetch = async (url, init) => {
     if (url === "https://ollama.com/api/chat") {
-      assert.equal(JSON.parse(init.body).model, "ollama-custom-model");
+      assert.equal(JSON.parse(init.body).model, "requested-ollama-model");
       return success();
     }
-    assert.match(url, /models\/gemma-4-31b-it:generateContent/);
+    assert.match(url, /models\/requested-gemini-model:generateContent/);
     return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
   };
-  assert.equal((await call()).statusCode, 200);
-  assert.equal((await call({ url: "/api/inference?provider=gemini" })).statusCode, 200);
+  for (const provider of ["ollama", "gemini"]) {
+    assert.equal((await call({ url: `/api/inference?provider=${provider}`,
+      body: { model: `requested-${provider}-model`, messages, webSearch: false } })).statusCode, 200);
+  }
 });
 
 test("concurrent provider selections keep their credentials and models separate", async () => {
@@ -250,7 +234,8 @@ test("concurrent provider selections keep their credentials and models separate"
     return Response.json({ candidates: [{ content: { parts: [{ text: "Gemini answer" }] } }] });
   };
   const [ollama, gemini] = await Promise.all([
-    call({ url: "/api/inference?provider=ollama" }), call({ url: "/api/inference?provider=gemini" }),
+    call({ url: "/api/inference?provider=ollama", body: { model: "ollama-test-model", messages, webSearch: false } }),
+    call({ url: "/api/inference?provider=gemini", body: { model: "gemini-test-model", messages, webSearch: false } }),
   ]);
   assert.equal(ollama.statusCode, 200);
   assert.deepEqual(ollama.body, { content: "Ollama answer", model: "ollama-test-model" });

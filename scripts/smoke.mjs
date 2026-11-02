@@ -4,14 +4,14 @@ import { parseArgs } from "node:util";
 import handler from "../api/inference.js";
 import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 import { smokeTimeoutMs } from "../lib/timeouts.js";
+import { normalizeModel } from "../lib/inference-request.js";
 
-const HELP = `Usage: npm run smoke -- [--provider ${Object.keys(PROVIDER_CONFIG).join("|")}] [--model MODEL] [--url ENDPOINT]
+const HELP = `Usage: npm run smoke -- --model MODEL [--provider ${Object.keys(PROVIDER_CONFIG).join("|")}] [--url ENDPOINT]
 
 By default, start a temporary local server using keys from .env.local.
 Omit --provider to use DEFAULT_INFERENCE_PROVIDER (otherwise replit).
-Use --model to override the selected provider's model for this local run only.
+--model is required and is sent in the inference request body.
 Use --url to test an existing /api/inference endpoint with its own server keys.
---model cannot be combined with --url; remote models are configured server-side.
 Runs a configuration probe and a short generation with web search disabled.
 `;
 
@@ -77,12 +77,11 @@ async function main() {
     !Object.hasOwn(PROVIDER_CONFIG, provider)) {
     throw new Error(`Choose --provider ${Object.keys(PROVIDER_CONFIG).join(", ")}.`);
   }
-  if (values.model !== undefined) {
-    if (!values.model.trim()) throw new Error("--model must be nonempty.");
-    if (values.url !== undefined) {
-      throw new Error("--model is only available for local smoke tests; --url uses the server's configured model.");
-    }
-    process.env[PROVIDER_CONFIG[provider].modelEnv] = values.model.trim();
+  let model;
+  try {
+    model = normalizeModel(values.model);
+  } catch {
+    throw new Error("--model is required: use a model ID of 1–200 characters without whitespace or control characters.");
   }
 
   let server;
@@ -117,6 +116,7 @@ async function main() {
         "X-Inference-Client": randomUUID(),
       },
       body: JSON.stringify({
+        model,
         messages: [{ role: "user", content: "Reply with exactly: smoke test OK" }],
         webSearch: false,
         options: { reasoningEffort: "none", temperature: 0 },

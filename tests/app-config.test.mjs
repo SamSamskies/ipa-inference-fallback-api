@@ -18,7 +18,6 @@ function environment() {
   return Object.fromEntries(Object.entries(apps).flatMap(([id, app]) =>
     Object.entries(app.providers).flatMap(([providerId, config]) => [
       [config.apiKeyEnv, `private-${id}-${providerId}-key`],
-      [config.modelEnv, `${id}/${providerId}-model`],
     ])));
 }
 
@@ -80,7 +79,7 @@ for (const providerId of providerIds) {
     };
     const results = await Promise.all(appIds.map(async (id) => {
       const config = resolve(id, providerId);
-      return config.adapter.generate(request, { ...config, signal: AbortSignal.timeout(1000) });
+      return config.adapter.generate(request, { ...config, model: `${id}/${providerId}-model`, signal: AbortSignal.timeout(1000) });
     }));
     assert.deepEqual(seen, appIds);
     assert.deepEqual(results.map(({ content, model }) => ({ content, model })),
@@ -126,25 +125,18 @@ test("unknown/disabled apps and providers outside the app allowlist fail closed"
   assert.equal(resolve("trendingnostr").apiKey, "private-trendingnostr-replit-key");
 });
 
-test("models use only their app override or registry default; invalid overrides fail closed", () => {
+test("app resolution contains only credentials and provider settings; models belong to requests", () => {
   const env = environment();
+  env.REPLIT_MODEL = "ignored-global-model";
+  env.TRENDINGNOSTR_REPLIT_MODEL = "ignored-app-model";
   const resolve = createAppConfigResolver(apps, env);
-  for (const id of appIds) {
-    for (const providerId of providerIds) {
-      const config = apps[id].providers[providerId];
-      env[`${providerId.toUpperCase()}_MODEL`] = "wrong-global-model";
-      for (const blank of [undefined, "", "  "]) {
-        if (blank === undefined) delete env[config.modelEnv];
-        else env[config.modelEnv] = blank;
-        assert.equal(resolve(id, providerId).model, config.model);
-      }
-      env[config.modelEnv] = " custom/model:tag ";
-      assert.equal(resolve(id, providerId).model, "custom/model:tag");
-      for (const invalid of ["two models", "model\nname", "x\u0000y", "x".repeat(201)]) {
-        env[config.modelEnv] = invalid;
-        rejectsWith(() => resolve(id, providerId), "invalid_app_config", 503);
-      }
-      delete env[config.modelEnv];
+  assert.equal(Object.hasOwn(resolve("trendingnostr"), "model"), false);
+  assert.equal(Object.hasOwn(resolve("trendingnostr"), "capabilities"), false);
+  assert.ok(appEnvNames().every((name) => !name.endsWith("_MODEL")));
+  for (const app of Object.values(apps)) {
+    for (const config of Object.values(app.providers)) {
+      assert.equal(Object.hasOwn(config, "model"), false);
+      assert.equal(Object.hasOwn(config, "modelEnv"), false);
     }
   }
 });
@@ -171,13 +163,10 @@ test("malformed registries reject invalid defaults, metadata, and reused environ
     (r) => { r.trendingnostr.name = " "; },
     (r) => { r.trendingnostr.providers = []; },
     (r) => { r.trendingnostr.providers.unknown = r.trendingnostr.providers.replit; },
-    (r) => { r.trendingnostr.providers.replit.model = ""; },
     (r) => { r.trendingnostr.providers.replit.enabled = "false"; },
     (r) => { r.trendingnostr.authSecretEnv = "private-secret-value"; },
     (r) => { r.trendingnostr.providers.replit.apiKeyEnv = ""; },
-    (r) => { r.trendingnostr.providers.replit.modelEnv = "invalid env name"; },
     (r) => { r.trendingnostr.providers.replit.apiKeyEnv = r.advancednostrsearch.providers.replit.apiKeyEnv; },
-    (r) => { r.trendingnostr.providers.replit.modelEnv = r.advancednostrsearch.providers.replit.modelEnv; },
     (r) => { r.trendingnostr.authSecretEnv = r.advancednostrsearch.authSecretEnv; },
     (r) => { r.trendingnostr.providers.ollama.maxTokensEnv = "OLLAMA_CAP"; },
   ]) {

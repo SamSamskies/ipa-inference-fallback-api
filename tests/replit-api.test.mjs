@@ -15,7 +15,7 @@ const messages = [{ role: "system", content: "Respond in Spanish unless the user
   { role: "user", content: "Hello" }, { role: "assistant", content: "Hola" },
   { role: "user", content: "Reply in French." }];
 const envNames = ["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "REPLIT_MAX_TOKENS",
-  ...Object.values(PROVIDER_CONFIG).flatMap(({keyEnv, modelEnv}) => [keyEnv, modelEnv])];
+  "REPLIT_MODEL", "OLLAMA_MODEL", "GEMINI_MODEL", ...Object.values(PROVIDER_CONFIG).map(({keyEnv}) => keyEnv)];
 const originalFetch = globalThis.fetch;
 const originalLookup = imageFetchDns.lookupAll;
 let previous;
@@ -41,6 +41,7 @@ async function call({method="POST", url="/api/inference?provider=replit", token=
   const res = {statusCode:200,headers:{},body:null,
     setHeader(name,value){this.headers[name]=value;},
     status(code){this.statusCode=code;return this;},json(value){this.body=value;return this;},end(){return this;}};
+  if (body && typeof body === "object" && !Array.isArray(body)) body = { model: MODEL, ...body };
   await handler({method,url,headers:{host:"example.test",origin:"https://example.test","x-inference-client":token},body},res);
   return res;
 }
@@ -78,11 +79,12 @@ test("Replit sends native chat, reasoning and temperature to the fixed gateway",
   assert.deepEqual(response.body,{content:"Bonjour",model:MODEL});
 });
 
-test("configured and returned Replit models take precedence over client model fields", async () => {
+test("requested Replit models override legacy env settings while gateway model IDs are preserved", async () => {
   process.env.REPLIT_MODEL="configured/model";
   globalThis.fetch=async (url,init) => {
     assert.equal(url,URL);
-    assert.equal(JSON.parse(init.body).model,"configured/model");
+    assert.equal(JSON.parse(init.body).model,"client/model");
+    assert.equal(init.headers.Authorization,"Bearer test-replit-key");
     return success("Answer",{model:"actual/model"});
   };
   const response=await call({body:{messages,webSearch:false,model:"client/model",baseUrl:"https://untrusted.test",apiKey:"client-key"}});
@@ -287,7 +289,11 @@ test("Replit can be the default while concurrent requests keep three providers s
     assert.match(url,/models\/gemini-model:generateContent\?key=test-gemini-key$/);
     return Response.json({candidates:[{content:{parts:[{text:"Gemini"}]}}]});
   };
-  const responses=await Promise.all([call({url:"/api/inference"}),call({url:"/api/inference?provider=ollama"}),call({url:"/api/inference?provider=gemini"})]);
+  const responses=await Promise.all([
+    call({url:"/api/inference",body:{model:"replit-model",messages,webSearch:false}}),
+    call({url:"/api/inference?provider=ollama",body:{model:"ollama-model",messages,webSearch:false}}),
+    call({url:"/api/inference?provider=gemini",body:{model:"gemini-model",messages,webSearch:false}}),
+  ]);
   assert.deepEqual(responses.map((res)=>res.statusCode),[200,200,200]);
   assert.deepEqual(responses.map((res)=>res.body.model),["replit-model","ollama-model","gemini-model"]);
 });

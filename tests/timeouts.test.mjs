@@ -6,7 +6,7 @@ import { PROVIDER_CONFIG } from "../lib/provider-config.js";
 import { requestTimeoutMs, smokeTimeoutMs } from "../lib/timeouts.js";
 
 const envNames = ["INFERENCE_REQUEST_TIMEOUT_MS", "INFERENCE_FALLBACK_ENABLED",
-  "INFERENCE_CLIENT_DAILY_LIMIT", ...Object.values(PROVIDER_CONFIG).flatMap(({keyEnv, modelEnv}) => [keyEnv,modelEnv])];
+  "INFERENCE_CLIENT_DAILY_LIMIT", ...Object.values(PROVIDER_CONFIG).map(({keyEnv}) => keyEnv)];
 const originalFetch = globalThis.fetch;
 let previous;
 beforeEach(() => {
@@ -61,7 +61,7 @@ test("all providers use the configured request deadline", async () => {
     const res = {setHeader(){},status(code){this.statusCode=code;return this;},json(value){this.body=value;return this;}};
     await handler({method:"POST",url:`/api/inference?provider=${provider}`,
       headers:{host:"example.test",origin:"https://example.test","x-inference-client":crypto.randomUUID()},
-      body:{messages:[{role:"user",content:"Test"}],webSearch:false}},res);
+      body:{model:"test-model",messages:[{role:"user",content:"Test"}],webSearch:false}},res);
     assert.equal(res.statusCode,200);
   }
   assert.deepEqual(deadlines,[73_000,73_000,73_000]);

@@ -26,7 +26,6 @@ beforeEach(() => {
   envNames.forEach((key) => delete process.env[key]);
   process.env.GEMINI_API_KEY = "test-key-not-a-credential";
   process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
-  process.env.GEMINI_MODEL = "test-model";
   process.env.INFERENCE_FALLBACK_ENABLED = "true";
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "50";
   globalThis.fetch = () => {
@@ -81,7 +80,7 @@ async function call({
     method,
     url,
     headers: { host: "example.test", origin, "x-inference-client": token, ...headers },
-    body,
+    body: body && typeof body === "object" && !Array.isArray(body) ? { model: "test-model", ...body } : body,
   };
   const res = {
     statusCode: 200,
@@ -407,7 +406,6 @@ test("provider errors release the allowance so the user can retry", async () => 
 });
 
 test("hosted lightweight reasoning maps to Gemma's minimal setting", async () => {
-  process.env.GEMINI_MODEL = "gemma-4-31b-it";
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
     assert.deepEqual(body.generationConfig.thinkingConfig, {
@@ -417,7 +415,7 @@ test("hosted lightweight reasoning maps to Gemma's minimal setting", async () =>
     return success();
   };
   const response = await call({
-    body: { messages, webSearch: false, options: { reasoningEffort: "none" } },
+    body: { model: "gemma-4-31b-it", messages, webSearch: false, options: { reasoningEffort: "none" } },
   });
   assert.equal(response.statusCode, 200);
 });
@@ -508,14 +506,13 @@ test("Gemini reasoning maps across model families and auto omits thinking config
     ["gemini-3-flash-preview", "auto", undefined],
     ["gemini-3-flash-preview", undefined, undefined],
   ]) {
-    process.env.GEMINI_MODEL = model;
     globalThis.fetch = async (_url, init) => {
       const config = JSON.parse(init.body).generationConfig;
       assert.deepEqual(config.thinkingConfig, expected);
       assert.equal(config.temperature, 0);
       return success();
     };
-    assert.equal((await call({ body: { messages, webSearch: false,
+    assert.equal((await call({ body: { model, messages, webSearch: false,
       options: { reasoningEffort: effort, temperature: 0 } } })).statusCode, 200);
   }
 });

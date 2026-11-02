@@ -3,8 +3,8 @@ import { clientQuota } from "../lib/client-quota.js";
 import { appEnvNames } from "../lib/apps.js";
 import { envInt, loadLocalEnvFallback } from "../lib/env.js";
 import { resolveProviderConfig } from "../lib/provider-config.js";
-import { getProvider } from "../lib/providers/registry.js";
-import { applyCapabilities, MAX_BODY_BYTES, normalizeRequest } from "../lib/inference-request.js";
+import { capabilitiesForModel, getProvider } from "../lib/providers/registry.js";
+import { applyCapabilities, MAX_BODY_BYTES, normalizeModel, normalizeRequest } from "../lib/inference-request.js";
 import { prepareRequestImages } from "../lib/inference-images.js";
 import { sendInferenceError, withSources } from "../lib/inference-response.js";
 import { requestTimeoutMs } from "../lib/timeouts.js";
@@ -66,7 +66,7 @@ export default async function handler(req, res) {
   }
 
   const selected = resolveProviderConfig(providerId);
-  const { adapter, apiKey, model, capabilities, maxTokens } = selected;
+  const { adapter, apiKey, maxTokens } = selected;
 
   if (req.method === "GET") {
     if (fallbackEnabled(apiKey)) {
@@ -120,8 +120,10 @@ export default async function handler(req, res) {
   }
 
   let request;
+  let model;
   try {
     request = normalizeRequest(body);
+    model = normalizeModel(body?.model);
   } catch (error) {
     sendInferenceError(res, error);
     return;
@@ -139,6 +141,7 @@ export default async function handler(req, res) {
   }
 
   let release;
+  const capabilities = capabilitiesForModel(adapter, model);
   const signal = AbortSignal.timeout(requestTimeoutMs());
   try {
     release = adapter.acquire?.(clientId);

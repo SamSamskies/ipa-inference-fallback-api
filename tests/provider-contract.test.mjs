@@ -9,7 +9,7 @@ import { capabilitiesForModel, getProvider, providers } from "../lib/providers/r
 
 const originalFetch = globalThis.fetch;
 const envNames = ["REPLIT_MAX_TOKENS", "INFERENCE_FALLBACK_ENABLED",
-  ...Object.values(providers).flatMap(({ config }) => [config.keyEnv, config.modelEnv])];
+  ...Object.values(providers).map(({ config }) => config.keyEnv)];
 let previous;
 let time = Date.now();
 beforeEach(() => {
@@ -87,7 +87,7 @@ test("registry is a fixed allowlist with provider and exact-model capability met
   }
   for (const adapter of Object.values(providers)) {
     assert.equal(typeof adapter.generate, "function");
-    assert.deepEqual(capabilitiesForModel(adapter, adapter.config.defaultModel),
+    assert.deepEqual(capabilitiesForModel(adapter, Object.keys(adapter.models)[0]),
       { vision: true, webSearch: true, reasoning: true });
     assert.deepEqual(capabilitiesForModel(adapter, "constructor"), adapter.capabilities);
     const customized = { ...adapter, models: { "text-only": { vision: false, reasoning: false } } };
@@ -197,7 +197,6 @@ for (const [id, adapter] of Object.entries(providers)) {
   test(`${id} endpoint applies server model capability restrictions before image fetching and generation`, async () => {
     const model = "restricted-model";
     adapter.models[model] = { vision: false, webSearch: false, reasoning: false };
-    process.env[adapter.config.modelEnv] = model;
     process.env[adapter.config.keyEnv] = "app-key";
     delete process.env.INFERENCE_FALLBACK_ENABLED;
     const hint = "The first user message includes the note's images before the text. Look at those images when they matter.";
@@ -222,7 +221,7 @@ for (const [id, adapter] of Object.entries(providers)) {
         method: "POST", url: `/api/inference?provider=${id}`,
         headers: { host: "example.test", origin: "https://example.test", "x-inference-client": crypto.randomUUID() },
         body: {
-          model: "client-model", apiKey: "client-key", capabilities: { vision: true, webSearch: true, reasoning: true },
+          model, apiKey: "client-key", capabilities: { vision: true, webSearch: true, reasoning: true },
           webSearch: true, options: { reasoningEffort: "high", temperature: 0 },
           messages: [{ role: "system", content: `Answer in French.\n${hint}` },
             { role: "user", content: [
