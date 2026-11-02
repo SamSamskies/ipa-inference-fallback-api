@@ -1,17 +1,16 @@
 # IPA inference fallback API
 
-A fallback inference endpoint for apps using the Inference Provider API (IPA).
-When no browser extension providing the Inference Provider API is detected,
-an app can use this endpoint for hosted inference. The app handles provider
-detection and decides when to use the fallback.
+A shared fallback inference endpoint for apps using the Inference Provider API
+(IPA). Apps retain IPA-first routing, prompts, consent, and their server-side
+proxies; this service supplies reusable Ollama Cloud, Gemini, and Replit adapters.
+It runs as a Node ESM `/api/inference` function with no runtime package dependencies.
 
-The endpoint runs as a standalone Node ESM `/api/inference` function.
-Callers can select Ollama Cloud, Gemini, or the Replit gateway per request;
-Ollama Cloud is the default.
-There are no runtime package dependencies or frontend/build framework dependencies.
-
-The existing origin checks and client token are not app authentication. Existing
-limits are in memory, per process, and do not provide a shared production quota.
+Every GET probe and POST inference request must authenticate a registered app.
+The app backend supplies the provider, model, and provider API key for each
+inference request. Provider credentials are owned by the calling backends and
+are never resolved from shared-service environment settings or another request.
+The registry stores app identity and allowed providers. Service policy owns
+provider limits, including an optional Replit completion cap.
 
 ## Local development
 
@@ -20,127 +19,212 @@ Requires Node.js 22+ and npm. Vercel CLI is pinned as a development dependency.
 ```sh
 npm ci
 cp .env.example .env.local
-# Set the API key for each provider callers should be able to use.
+npm run --silent generate:app-secret
+# Set a separate app secret for each enabled app in .env.local.
 npm run dev:vercel
 ```
 
-On first use, sign in with `npx vercel login` and follow Vercel's prompts to link
-a development project. Use the **Other** framework preset with no frontend build
-or development command. The script is named `dev:vercel` because Vercel rejects a
-`dev` script that recursively invokes itself. Secrets belong in `.env.local` or
-the Vercel environment; local env files are ignored by Git. The extracted env
-loader fills missing `DEFAULT_INFERENCE_PROVIDER`, `INFERENCE_`, `OLLAMA_`, and
-`GEMINI_` and `REPLIT_` values from `.env.local` then `.env`, without overriding existing
-nonempty environment values.
+On first use, sign in with `npx vercel login` and link a development project.
+Use the **Other** framework preset with no frontend build or development command.
+Secrets belong in ignored local environment files or server-side environment
+settings. The shared service's local loader reads only its exact settings:
+`INFERENCE_FALLBACK_ENABLED`, `INFERENCE_CLIENT_DAILY_LIMIT`,
+`INFERENCE_REQUEST_TIMEOUT_MS`, the three `OLLAMA_` limits, `REPLIT_MAX_TOKENS`,
+and the app secret names registered in `lib/apps.js`. It fills missing settings
+from `.env.local` then `.env` without overriding nonempty injected values. It does not load provider
+API keys, smoke caller keys, or obsolete provider/model defaults.
 
-`vercel.json` requests a [180 second function duration](https://vercel.com/docs/functions/configuring-functions/duration),
-supported on Hobby with Fluid Compute enabled. Each inference request has a
-120-second total timeout by default, covering image downloads, provider calls,
-search, and retries. Set `INFERENCE_REQUEST_TIMEOUT_MS` to change this budget;
-values above 170,000 ms are capped to leave 10 seconds before Vercel's limit.
-There is no frontend at `/`; use `/api/inference`.
+`vercel.json` requests a [180 second function duration](https://vercel.com/docs/functions/configuring-functions/duration).
+Each request has a 120-second total timeout covering images, generation, search,
+and retries. `INFERENCE_REQUEST_TIMEOUT_MS` is capped at 170,000 ms. There is no
+frontend at `/`; use `/api/inference` through a server-side app proxy.
 
-```sh
-curl -i http://localhost:3000/api/inference
-curl -i 'http://localhost:3000/api/inference?provider=ollama' \
-  -H 'Origin: http://localhost:3000' \
-  -H 'Content-Type: application/json' \
-  -H 'X-Inference-Client: local-example-client' \
-  --data '{"messages":[{"role":"user","content":"Explain DNS in one sentence."}],"webSearch":false,"options":{"reasoningEffort":"none","temperature":0.3}}'
+## Server-to-server requests
+
+The calling backend sets these headers itself; never forward browser-supplied
+app identity, authorization, provider keys, provider selection, or model selection:
+
+| Header | Purpose |
+| --- | --- |
+| `X-Inference-App` | Registered app ID: `trendingnostr` or `advancednostrsearch` |
+| `Authorization: Bearer <app secret>` | Authenticates that app against its registered server-side secret |
+| `X-Inference-Provider-Key` | Credential for the provider selected by this request |
+| `X-Inference-Client` | Required POST client token, scoped to the authenticated app for quotas |
+
+For example, inside the TrendingNostr **backend**:
+
+```js
+const response = await fetch("https://your-service.vercel.app/api/inference?provider=replit", {
+  method: "POST",
+  redirect: "error",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Inference-App": "trendingnostr",
+    Authorization: `Bearer ${process.env.TRENDINGNOSTR_APP_SECRET}`,
+    "X-Inference-Provider-Key": process.env.REPLIT_API_KEY,
+    "X-Inference-Client": clientToken,
+  },
+  body: JSON.stringify({
+    model: "google/gemma-4-26b-a4b-it",
+    messages: [{ role: "user", content: "Explain DNS in one sentence." }],
+    webSearch: false,
+    options: { reasoningEffort: "none", temperature: 0.3 },
+  }),
+});
 ```
 
-The probe returns `200 {"ok":true}` when the selected provider is configured and
-enabled, or `503 {"ok":false,"error":"missing_api_key"}` / `"disabled"`. It checks
-configuration only and does not contact the provider. Use
-`GET /api/inference?provider=gemini` to probe a specific provider. An unsupported
-configured default returns `503 {"error":"invalid_provider"}`; an invalid caller
-selection returns `400 {"error":"invalid_provider"}`.
+`REPLIT_API_KEY` above belongs to the **app backend** environment. It is not a
+shared-service setting. Each backend can use its own names for provider keys.
+Use HTTPS between deployed backends. Provider destinations are fixed in the
+adapters, and credential-bearing requests reject redirects. Gemini uses
+`x-goog-api-key`, keeping credentials out of its request URL.
+
+App authentication runs before provider resolution, credential validation, quota
+reservation, image fetching, and generation. Missing, incorrect, ambiguous,
+unknown-app, disabled-app, or unconfigured app credentials return
+`401 unauthorized_app`. Provider credentials do not authenticate an app. App
+secrets are compared with a timing-safe comparison of fixed-length hashes.
+
+A provider key must be a single header containing 1–8192 visible ASCII characters,
+without whitespace or commas. Missing keys return `400 missing_api_key`; malformed
+keys return `400 invalid_api_key`. Duplicate credential headers are rejected.
+Keys in bodies, query parameters, global env settings, or per-app env settings
+never substitute for the header. No request key is written to `process.env`,
+a cache, or persistent storage by the shared handler.
+
+`GET /api/inference?provider=replit` requires the same app authentication and
+provider-key header. It returns `200 {"ok":true}` when the app/provider is enabled,
+the credential is syntactically valid, and the fallback switch is on. The probe
+makes no upstream request and does not verify that the provider accepts the key.
+GET requires neither a model nor a client token.
+
+Authenticated backend requests need no `Origin`. If an Origin is supplied, it
+must match the existing localhost/same-host/Vercel allowlist. CORS preflight
+requires no secrets. CORS permission is not authentication, and secret headers
+are not added to the browser CORS allowlist.
 
 ## Smoke testing
 
-Add provider keys to `.env.local`, then run:
+The smoke CLI acts as a caller backend. Set the selected app's registered
+`*_APP_SECRET` and `INFERENCE_SMOKE_PROVIDER_KEY` in its local environment (or
+ignored local `.env.local`). The provider key is read only by the CLI, not the
+shared handler. Never configure `INFERENCE_SMOKE_PROVIDER_KEY` on the shared Vercel
+deployment. Credentials are not accepted as CLI arguments.
 
 ```sh
-npm run smoke -- --provider ollama
-npm run smoke -- --provider gemini
-npm run smoke -- --provider replit
-npm run smoke
+npm run smoke -- --app trendingnostr --provider ollama --model gemma4:cloud
+npm run smoke -- --app trendingnostr --provider gemini --model gemma-4-31b-it
+npm run smoke -- --app advancednostrsearch --provider replit --model google/gemma-4-26b-a4b-it
 ```
 
-The script starts a temporary local HTTP server around the actual inference
-handler, probes configuration, and sends a short generation request to the chosen
-provider. No Vercel login or running development server is needed. Without
-`--provider`, it uses `DEFAULT_INFERENCE_PROVIDER` (Ollama when unset).
-Keys and model settings load from `.env.local` using the same rules as the API.
-Override the selected provider's model for a single run with `--model`:
+All three flags are required. Set `INFERENCE_SMOKE_PROVIDER_KEY` for the provider
+you are testing. The CLI starts a temporary local server around the actual handler,
+probes configuration, and sends a short generation request with search disabled
+and reasoning effort `none`. No Vercel login or running dev server is needed.
+This makes a real provider API call and may consume quota or incur a small charge.
 
-```sh
-npm run smoke -- --provider ollama --model gemma4:cloud
-npm run smoke -- --provider gemini --model gemma-4-31b-it
-npm run smoke -- --provider replit --model google/gemma-4-26b-a4b-it
-```
+To target an existing service, append `--url https://your-service.vercel.app/api/inference`.
+The caller still supplies its app secret and provider key. HTTP targets are allowed
+only for loopback development, and redirects are rejected. An explicit provider
+replaces any provider parameters in the supplied URL. The CLI leaves environment
+files unchanged, prints model/response/timing with credential echoes redacted, and
+exits nonzero on failures. Its timeout is the configured request budget plus
+30 seconds (150 seconds by default). Use `npm run smoke -- --help` for usage.
 
-The override applies only to the smoke-test process and leaves `.env.local`
-unchanged. Omit `--provider` to override the default provider's model.
-Web search is off and reasoning effort is `none`. This makes a real provider API
-call and may consume quota or incur a small charge.
-
-The script prints the model, response, and elapsed time, then shuts down its
-temporary server. It exits nonzero for configuration, connection, or provider
-failures and malformed responses. API keys are never printed or sent to the
-endpoint by the script; they stay in the server's provider requests.
-Its timeout is the locally configured request budget plus 30 seconds (150 seconds
-by default).
-
-To test a running Vercel development server or deployed endpoint instead:
-
-```sh
-npm run smoke -- --provider gemini --url http://localhost:3000/api/inference
-npm run smoke -- --provider ollama --url https://your-service.vercel.app/api/inference
-```
-
-With `--url`, the target server supplies its own provider keys and model settings.
-`--model` cannot be combined with `--url`. Omit `--provider` to test that server's
-default. Set `INFERENCE_REQUEST_TIMEOUT_MS` locally to match the target's request
-budget when testing a server with a different timeout. Use
-`npm run smoke -- --help` for usage.
-
-## Configuration
+## Shared service configuration
 
 | Variable | Default / behavior |
 | --- | --- |
-| `DEFAULT_INFERENCE_PROVIDER` | `ollama`, `gemini`, or `replit`; defaults to `ollama`; used when the request omits `provider` |
-| `INFERENCE_FALLBACK_ENABLED` | Enabled when the selected provider has a key; `0`, `false`, or `off` disables it |
-| `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per client token per UTC day |
-| `INFERENCE_REQUEST_TIMEOUT_MS` | 120,000 ms total per request; positive integer, capped at 170,000 ms; invalid values use the default |
-| `OLLAMA_API_KEY` | Required for Ollama; Gemini keys are never sent to Ollama |
-| `OLLAMA_MODEL` | `gemma4:cloud`, mapped to `gemma4:31b` on the direct cloud API |
-| `OLLAMA_REQUESTS_PER_MINUTE` | 20 upstream attempts across clients, including search/continuation calls |
-| `OLLAMA_CLIENT_REQUESTS_PER_MINUTE` | 5 explanation attempts per client token |
-| `OLLAMA_MAX_CONCURRENT` | 2 active explanations |
-| `GEMINI_API_KEY` | Required for Gemini |
-| `GEMINI_MODEL` | `gemma-4-31b-it` |
-| `REPLIT_API_KEY` | The Replit gateway's bearer token; required for Replit |
-| `REPLIT_MODEL` | `google/gemma-4-26b-a4b-it` |
-| `REPLIT_MAX_TOKENS` | Optional total completion-token cap, including reasoning; unset uses gateway/model defaults |
+| `INFERENCE_FALLBACK_ENABLED` | Enabled unless `0`, `false`, or `off` |
+| `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per authenticated app + client token per UTC day, shared across that app's providers |
+| `INFERENCE_REQUEST_TIMEOUT_MS` | 120,000 ms; positive integer capped at 170,000 ms |
+| `OLLAMA_REQUESTS_PER_MINUTE` | 20 upstream attempts across apps/clients, including search/continuation calls |
+| `OLLAMA_CLIENT_REQUESTS_PER_MINUTE` | 5 explanation attempts per app + client token |
+| `OLLAMA_MAX_CONCURRENT` | 2 active explanations across apps |
+| `TRENDINGNOSTR_APP_SECRET` | Required to authenticate TrendingNostr |
+| `ADVANCEDNOSTRSEARCH_APP_SECRET` | Required to authenticate AdvancedNostrSearch |
+| `REPLIT_MAX_TOKENS` | Optional service-owned cap, including reasoning and the final answer; positive decimal safe integer. Unset or blank omits `max_tokens` and uses gateway/upstream defaults |
 
-Set `OLLAMA_MODEL`, `GEMINI_MODEL`, and `REPLIT_MODEL` to configure each provider's model. When
-unset, each provider uses its built-in default listed above.
-Replit leaves the output budget to the gateway unless `REPLIT_MAX_TOKENS` is set.
-Reasoning models need room for both reasoning and the final answer; a small total
-cap can exhaust the budget before visible answer text is produced. All calls
-remain subject to the configured per-request total timeout (120 seconds by default).
-Numeric limits accept positive values, flooring them to integers; invalid values
-fall back to defaults.
+There is no default Replit cap in this service. Absent or blank
+`REPLIT_MAX_TOKENS` omits `max_tokens` from upstream requests. Set it only to
+enforce a service-wide override. Invalid nonblank settings return
+`503 invalid_provider_config` for Replit probes and inference requests before
+quota reservation or upstream work; other
+providers are unaffected. Registered apps cannot override the cap through body,
+options, or query fields (`max_tokens`, `maxTokens`, and `max_completion_tokens`
+are ignored). Old app-specific cap settings are unused.
+
+An explicit cap includes reasoning and visible answer tokens. Choose a value
+supported by the configured models and verify it with live smoke tests. Without
+an override, output limits follow the gateway/upstream behavior; this service
+does not assume the gateway has explicit per-model defaults. Other numeric limits
+retain their existing positive-integer/default behavior. Rate limits remain in
+memory per process; Vercel instances do not share quota or concurrency state. Distributed limits and
+spend safeguards remain in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+
+There are no shared provider/model defaults or stored provider-key settings.
+Before rolling out, move provider credentials into the appropriate app backends
+and configure their authenticated proxies. Remove obsolete global and app-scoped
+`*_API_KEY`, `*_MODEL`, `DEFAULT_INFERENCE_PROVIDER`, and app-specific
+`*_REPLIT_MAX_TOKENS` settings from the shared deployment and local service
+configuration after migration.
+Existing stored secrets are not deleted by this source change. App secrets and
+the service-wide `REPLIT_MAX_TOKENS` remain shared-service settings.
+
+The shared service handles provider keys transiently, so a running-service
+compromise could still capture keys in active requests. Application logs omit raw
+provider errors and credential values. Configure platform logs/traces to redact
+`Authorization`, `X-Inference-Provider-Key`, and upstream credential headers;
+request bodies and full headers should not be logged. Provider-key echoes in
+successful responses are redacted too.
+
+## Application registry
+
+`lib/apps.js` registers TrendingNostr and AdvancedNostrSearch, both allowing
+Ollama, Gemini, and Replit. Entries contain `name`, boolean `enabled`,
+`authSecretEnv`, and a provider allowlist with optional `enabled` settings.
+The immutable registry contains no provider credentials, provider-key environment
+names, model settings, default provider, or token-limit settings.
+
+`resolveAppProviderConfig(appId, providerId)` resolves a trusted app/provider into
+`{ appId, providerId, adapter }`. `authenticateApp(req)` verifies the
+request identity before the HTTP handler calls it. Unknown/disabled apps are
+rejected by authentication; disallowed providers return `403 provider_not_allowed`
+and disabled providers return `503 provider_disabled`.
+
+To onboard another app:
+
+1. Add its unique lowercase ID, metadata, unique `authSecretEnv`, and explicit
+   provider allowlist in `lib/apps.js`. Registered app secret names are loaded
+   locally automatically.
+2. Generate a separate app secret with `npm run --silent generate:app-secret`.
+   Configure it in the shared service and that app's backend. The command prints
+   a fresh 256-bit URL-safe value and does not write configuration files.
+3. Store provider keys only in that app's backend. Have its proxy authenticate,
+   set the provider-key header, provider query parameter, and model body field,
+   and preserve upstream status codes and `Retry-After` for its browser client.
+4. Run `npm test` and an authenticated smoke request before rollout.
+
+Rotate provider keys in their owning backend; the next request uses the new key
+without a shared-service configuration change. Coordinate app-secret rotation
+between the shared service and app backend; the current registry accepts one
+secret per app. Browser bundles must never contain app secrets or provider keys.
+
+This implements the registry from [issue #4](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/4)
+and the authentication/routing portion of [issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5).
+Provider discovery and frontend migrations remain separate work; no deployment
+or stored-secret cleanup is performed by these source changes.
 
 ## Provider adapters
 
 `lib/providers/registry.js` is the static allowlist for Ollama, Gemini, and Replit.
-Each entry describes its environment settings, default model, capabilities, and
+Each entry describes its capabilities and
 `generate(normalizedRequest, { model, apiKey, signal, maxTokens? })` function.
-The environment resolver in `lib/provider-config.js` supplies the selected
-configuration for each request; adapters receive credentials and model IDs
-explicitly. Replit's optional completion budget is passed as `maxTokens`.
+The app resolver supplies the allowed adapter; the handler supplies the validated
+request model and request-local provider key explicitly. `lib/replit-limits.js`
+resolves the optional service-owned Replit cap. The handler passes it as
+`maxTokens` when configured; otherwise the adapter omits `max_tokens`.
+Adapters continue to receive their configuration explicitly.
 
 The shared request format has `system`, `messages`, `options`, and `webSearch`.
 Messages use `user`/`assistant` roles and `parts` containing `{ text }` or
@@ -154,11 +238,11 @@ response parsing, and provider-specific retry/error classification.
 Registry entries define `capabilities: { vision, webSearch, reasoning }` and a
 `models` map of exact model IDs to partial capability overrides. For example,
 `models: { "your-text-model": { vision: false, reasoning: false } }` disables
-images and explicit reasoning controls for that configured model while inheriting
+images and explicit reasoning controls for that requested model while inheriting
 the provider's search setting. Image URLs then remain text, inline images are
 omitted, and unsupported search/reasoning controls are omitted from native calls.
 These are server-owned settings; clients cannot override them. Defaults preserve
-the existing best-effort controls for configured models, including unknown model
+the existing best-effort controls for requested models, including unknown model
 IDs; this metadata does not discover or guarantee upstream model support.
 
 To replace an implementation, update its registry entry and implement the JSDoc
@@ -173,22 +257,22 @@ using the same `/api/inference` contract.
 ## Request and response contract
 
 Select a provider with `POST /api/inference?provider=ollama`,
-`POST /api/inference?provider=gemini`, or `POST /api/inference?provider=replit`. Omitting the parameter uses
-`DEFAULT_INFERENCE_PROVIDER`. The same selection applies to `GET` probes.
-Unknown, empty, or repeated `provider` parameters return `400 invalid_provider`.
-The chosen provider must have a server-side API key and be enabled; otherwise
-the request returns `503 missing_api_key` or `503 disabled`. Requests do not
-automatically switch providers on failure.
+`POST /api/inference?provider=gemini`, or `POST /api/inference?provider=replit`.
+Exactly one `provider` query parameter is required for POST requests and GET
+probes. Its value is trimmed and lowercased. Missing, unknown, empty, or repeated
+`provider` parameters return `400 invalid_provider`; a body field cannot supply it.
+The chosen provider must be enabled and allowed for the authenticated app. The
+backend supplies its key in `X-Inference-Provider-Key`; missing credentials return
+`400 missing_api_key`. The global fallback switch returns `503 disabled` when off.
+Requests do not automatically switch providers on failure.
 
-`POST /api/inference` requires an allowed `Origin` and a nonempty
-`X-Inference-Client` header. Allowed origins are localhost/127.0.0.1, the request
-host over HTTPS, and Vercel's `VERCEL_URL`, `VERCEL_BRANCH_URL`, and
-`VERCEL_PROJECT_PRODUCTION_URL` values. `OPTIONS` supports the existing CORS
-preflight contract. The future authenticated frontend proxies are not implemented
-in this extraction; server-to-server calls currently still require `Origin`.
+POST requires authenticated app headers, a request-local provider-key header, and
+a nonempty `X-Inference-Client`. GET requires the same credentials and provider
+selection. Origin is optional for authenticated server-to-server calls.
 
 ```json
 {
+  "model": "google/gemma-4-26b-a4b-it",
   "messages": [
     { "role": "system", "content": "Caller-owned instructions, including response language." },
     { "role": "user", "content": "Question" },
@@ -199,6 +283,18 @@ in this extraction; server-to-server calls currently still require `Origin`.
   "options": { "reasoningEffort": "none", "temperature": 0.3 }
 }
 ```
+
+`model` is required in every POST JSON body. It must be a string that, after
+trimming, contains 1–200 characters with no whitespace or control characters.
+Missing or invalid models return `400 invalid_model` before quota reservation,
+image downloads, or generation. A `model` query parameter does not supply or
+override the body field. GET probes require no model and only check provider
+configuration. `gemma4:cloud` retains its Ollama API alias mapping to `gemma4:31b`.
+
+The intended caller is the app's server-side proxy: set the model there as
+backend-owned configuration rather than forwarding a browser-supplied model.
+The shared API has no model default or model allowlist. App authentication and
+provider allowlists apply before generation.
 
 The conversation must start and end with a usable user turn (excluding system
 messages). Text content may also be an array of `{ "type": "text", "text": "..." }`
@@ -218,7 +314,8 @@ disable it; other non-boolean values return `400 invalid_request`. Ollama calls
 three chat calls. Gemini uses Google Search grounding and retries capacity errors
 once. Replit calls the fixed
 [`samsamskies-inference.replit.app` gateway](https://samsamskies-inference.replit.app)
-at `/api/v1/chat/completions` using `REPLIT_API_KEY`. With search enabled, it sends
+at `/api/v1/chat/completions` using the request-supplied provider key. With search
+enabled, it sends
 `tools: [{"type":"openrouter:web_search"}]` and leaves execution to the gateway,
 following [OpenRouter's hosted search format](https://openrouter.ai/docs/guides/features/server-tools/web-search).
 Returned `url_citation` annotations become source links. Replit uses OpenAI-compatible
@@ -227,22 +324,23 @@ the rejected field, within the same deadline.
 
 All providers append source links when needed. `reasoningEffort` accepts `auto`,
 `none`, `low`, `medium`, and `high`; it maps to each provider's existing thinking
-settings. `temperature` accepts numbers from 0 through 2. Callers select only the
-provider through the query parameter; models, credentials, and provider base URLs
-remain under server control.
+settings. `temperature` accepts numbers from 0 through 2. App backends select the
+provider through the query parameter, model through the body, and provider key
+through its dedicated header. Provider base URLs remain fixed in the shared API.
 
 Successful requests return `200 {"content":"...","model":"..."}`. Errors retain
 their existing JSON shape and codes:
 
 | HTTP status | Error codes |
 | --- | --- |
-| 400 | `invalid_provider` (caller selection), `invalid_json`, `invalid_request`, `missing_client_token`, Gemini `provider_error` (with upstream `http` and optional `providerStatus`) |
-| 403 | `forbidden_origin` |
+| 400 | `invalid_provider`, `missing_api_key`, `invalid_api_key`, `invalid_json`, `invalid_request`, `invalid_model`, `missing_client_token`, Gemini `provider_error` (with upstream `http` and optional `providerStatus`) |
+| 401 | `unauthorized_app` |
+| 403 | `forbidden_origin`, `provider_not_allowed` |
 | 405 | `method_not_allowed` |
 | 413 | `payload_too_large` |
 | 429 | `client_limit`, `client_capacity`, `rate_limited`, `quota_exhausted`, `search_quota` |
 | 502 | `provider_error`, Ollama/Replit `model_unavailable`, Ollama/Replit `provider_auth` |
-| 503 | `missing_api_key`, `disabled`, `invalid_provider` (configured default), `provider_busy` |
+| 503 | `disabled`, `provider_disabled`, `invalid_app_config`, `invalid_provider_config`, `provider_busy` |
 
 Ollama rate limits/cooldowns, Replit gateway rate limits, and Gemini 429s retain `Retry-After`;
 Replit maps insufficient-credit responses to `quota_exhausted`. Gemini quota classification
@@ -265,6 +363,7 @@ Tests use Node's built-in runner with mocked providers, image transport, and DNS
 they need no credentials or network access. They cover validation, probes/CORS,
 timeouts, limits and `Retry-After`, bounded search, images/SSRF/redirects, reasoning,
 language instruction forwarding, Gemini capacity/quota handling, malformed
-provider replies, provider/model/auth failures, and default/explicit provider
-selection with credential/model isolation. Live provider generation is a separate,
+provider replies, provider/model/auth failures, and required provider/model
+selection, app authentication, request-local credential isolation, duplicate-header
+rejection, error redaction, and app-scoped client quotas. Live generation is a separate,
 credentialed check.

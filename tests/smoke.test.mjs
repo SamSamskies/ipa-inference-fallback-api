@@ -13,13 +13,15 @@ function readJsonLines(path) {
   catch (error) { if (error.code === "ENOENT") return []; throw error; }
 }
 
-function run(args, scenario = "success", requestTimeout = "") {
+function run(args, scenario = "success", requestTimeout = "", app = "trendingnostr") {
+  if (app) args = ["--app", app, ...args];
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=replit\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\nTRENDINGNOSTR_APP_SECRET=${scenario === "missing_app_secret" ? "" : "private-smoke-app-secret"}\nINFERENCE_SMOKE_PROVIDER_KEY=${scenario === "missing_caller_key" ? "" : "private-smoke-provider-key"}\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
+      import assert from "node:assert/strict";
       import { appendFileSync } from "node:fs";
       import http from "node:http";
       import { syncBuiltinESMExports } from "node:module";
@@ -57,11 +59,14 @@ function run(args, scenario = "success", requestTimeout = "") {
           });
         }
         if (url === "https://ollama.com/api/chat") {
+          assert.equal(init.headers.Authorization, "Bearer private-smoke-provider-key");
           const model = JSON.parse(init.body).model;
           appendFileSync("requests.jsonl", JSON.stringify({provider:"ollama", model}) + "\\n");
           return Response.json({message:{role:"assistant",content:"smoke test OK"}});
         }
         if (target.hostname === "generativelanguage.googleapis.com") {
+          assert.equal(init.headers["x-goog-api-key"], "private-smoke-provider-key");
+          assert.equal(target.search, "");
           const model = decodeURIComponent(target.pathname.split("/models/")[1].split(":generateContent")[0]);
           appendFileSync("requests.jsonl", JSON.stringify({provider:"gemini", model}) + "\\n");
           return Response.json({candidates:[{content:{parts:[{text:"smoke test OK"}]}}]});
@@ -71,14 +76,23 @@ function run(args, scenario = "success", requestTimeout = "") {
           if (target.pathname !== "/api/v1/chat/completions") {
             return new Response("<!DOCTYPE html><html>Inference Gateway</html>", {headers:{"Content-Type":"text/html"}});
           }
+          assert.equal(init.headers.Authorization, "Bearer private-smoke-provider-key");
           const model = JSON.parse(init.body).model;
           appendFileSync("requests.jsonl", JSON.stringify({provider:"replit", model}) + "\\n");
           return Response.json({choices:[{message:{role:"assistant",content:"smoke test OK"}}]});
         }
-        const request = { url: String(url), method: init.method, headers: init.headers,
+        assert.equal(init.redirect, "error");
+        assert.equal(init.headers.Authorization, "Bearer private-smoke-app-secret");
+        assert.equal(init.headers["X-Inference-App"], "trendingnostr");
+        assert.equal(init.headers["X-Inference-Provider-Key"], "private-smoke-provider-key");
+        const safeHeaders = { ...init.headers, Authorization: "[redacted]", "X-Inference-Provider-Key": "[redacted]" };
+        const request = { url: String(url), method: init.method, headers: safeHeaders,
           body: init.body ? JSON.parse(init.body) : undefined };
         appendFileSync("requests.jsonl", JSON.stringify(request) + "\\n");
         const scenario = process.env.IPA_SMOKE_SCENARIO;
+        if (scenario === "transport_secret") throw new Error("private-smoke-provider-key private-smoke-app-secret");
+        if (scenario === "redirect") return new Response("", {status:302,headers:{Location:"https://untrusted.test"}});
+        if (scenario === "echo_secrets" && init.method === "POST") return Response.json({content:"private-smoke-app-secret private-smoke-provider-key",model:"private-smoke-provider-key"});
         if (scenario === "timeout") throw new DOMException("Timed out", "TimeoutError");
         if (scenario === "unreachable") throw new TypeError("fetch failed");
         if (scenario === "missing_key") return Response.json({error:"missing_api_key"}, {status:503});
@@ -92,14 +106,14 @@ function run(args, scenario = "success", requestTimeout = "") {
       };
     `);
     const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-      !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|REPLIT_|NODE_OPTIONS)/.test(name)));
+      !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|REPLIT_|TRENDINGNOSTR_|ADVANCEDNOSTRSEARCH_|NODE_OPTIONS)/.test(name)));
     const result = spawnSync(process.execPath, ["--import", mockPath, script, ...args], {
-      cwd: directory, env: { ...env, IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
+      cwd: directory, env: { ...env, DEFAULT_INFERENCE_PROVIDER: "replit", IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
     });
     assert.ifError(result.error);
     assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
     const output = result.stdout + result.stderr;
-    assert.doesNotMatch(output, /private-(?:gemini|ollama|replit)-test-key/);
+    assert.doesNotMatch(output, /private-(?:gemini|ollama|replit)-test-key|private-smoke/);
     return { ...result, output, requests: readJsonLines(join(directory,"requests.jsonl")),
       timeouts: readJsonLines(join(directory,"timeouts.jsonl")) };
   } finally {
@@ -113,22 +127,36 @@ test("smoke help and invalid arguments exit without a request", () => {
   assert.match(help.output, /--provider ollama\|gemini/);
   assert.match(help.output, /--model MODEL/);
   assert.equal(help.requests.length, 0);
-  for (const args of [["--provider", "unknown"], ["--provider", ""], ["--unknown"],
-    ["--model", ""], ["--model", "  "],
-    ["--model", "custom-model", "--url", "https://smoke.example/api/inference"],
-    ["--url", "invalid"], ["--url", "file:///etc/passwd"], ["--url", "https://user:password@example.test"]]) {
+  for (const args of [[], ["--provider", "unknown"], ["--provider", ""], ["--unknown"],
+    ["--provider", "replit", "--model", ""], ["--provider", "replit", "--model", "  "],
+    ["--provider", "replit", "--model", "two models"],
+    ["--provider", "replit", "--model", "x".repeat(201)],
+    ["--provider", "replit", "--model", "model", "--url", "invalid"],
+    ["--provider", "replit", "--model", "model", "--url", "file:///etc/passwd"],
+    ["--provider", "replit", "--model", "model", "--url", "https://user:password@example.test"],
+    ["--provider", "unknown", "--model", "model", "--url", "https://smoke.example/api/inference"],
+    ["--provider", "replit", "--model", "model", "--url", "http://smoke.example/api/inference"]]) {
     const result = run(args);
     assert.equal(result.status, 1);
     assert.equal(result.requests.length, 0);
   }
 });
 
-test("smoke model overrides reach the selected provider without changing the env file", () => {
+test("smoke requires a model even when legacy model environment variables are set", () => {
+  for (const args of [["--provider", "ollama"], ["--provider", "replit", "--url", "https://smoke.example/api/inference"]]) {
+    const result = run(args);
+    assert.equal(result.status, 1);
+    assert.match(result.output, /--model is required/);
+    assert.equal(result.requests.length, 0);
+  }
+});
+
+test("smoke request models reach each selected provider without changing the env file", () => {
   for (const [args, provider, model] of [
     [["--provider", "ollama", "--model", "  custom:cloud  "], "ollama", "custom:cloud"],
     [["--provider", "gemini", "--model", "custom-gemini-model"], "gemini", "custom-gemini-model"],
     [["--provider", "replit", "--model", "custom/replit-model"], "replit", "custom/replit-model"],
-    [["--model", "default-provider-model"], "gemini", "default-provider-model"],
+    [["--provider", " REPLIT ", "--model", "backend/model"], "replit", "backend/model"],
   ]) {
     const result = run(args);
     assert.equal(result.status, 0, result.output);
@@ -137,17 +165,21 @@ test("smoke model overrides reach the selected provider without changing the env
   }
 });
 
-test("local smoke without a model override uses the provider's configured model", () => {
-  for (const provider of ["ollama", "gemini", "replit"]) {
-    const result = run(["--provider", provider]);
-    assert.equal(result.status, 0, result.output);
-    assert.deepEqual(result.requests, [{provider, model:`configured-${provider}-model`}]);
+test("smoke requires an explicit provider despite legacy defaults and URL parameters", () => {
+  for (const args of [
+    ["--model", "backend/model"],
+    ["--model", "backend/model", "--url", "https://smoke.example/api/inference?provider=replit"],
+  ]) {
+    const result = run(args);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /--provider is required/);
+    assert.equal(result.requests.length, 0);
   }
 });
 
-test("smoke selects each provider and sends the endpoint contract without credentials", () => {
+test("remote smoke sends model in the body and credentials only in headers", () => {
   for (const provider of ["ollama", "gemini", "replit"]) {
-    const result = run(["--provider", provider, "--url", "https://smoke.example/api/inference"]);
+    const result = run(["--provider", provider, "--model", "backend/model", "--url", "https://smoke.example/api/inference"]);
     assert.equal(result.status, 0, result.output);
     assert.match(result.output, /Smoke test passed/);
     assert.match(result.output, /Model: mock-model/);
@@ -155,22 +187,28 @@ test("smoke selects each provider and sends the endpoint contract without creden
     assert.deepEqual(result.requests.map((request) => request.method), ["GET", "POST"]);
     for (const request of result.requests) {
       assert.equal(new URL(request.url).searchParams.get("provider"), provider);
+      assert.equal(new URL(request.url).searchParams.has("model"), false);
     }
     const post = result.requests[1];
-    assert.equal(post.headers.Origin, "https://smoke.example");
+    assert.equal(post.headers.Origin, undefined);
+    assert.equal(post.headers["X-Inference-App"], "trendingnostr");
+    assert.equal(post.headers.Authorization, "[redacted]");
+    assert.equal(post.headers["X-Inference-Provider-Key"], "[redacted]");
     assert.ok(post.headers["X-Inference-Client"]);
+    assert.equal(post.body.model, "backend/model");
     assert.equal(post.body.webSearch, false);
     assert.equal(post.body.options.reasoningEffort, "none");
     assert.equal(post.body.messages[0].role, "user");
-    assert.doesNotMatch(JSON.stringify(result.requests), /private-(?:gemini|ollama|replit)-test-key/);
+    assert.doesNotMatch(JSON.stringify(result.requests), /private-(?:gemini|ollama|replit)-test-key|private-smoke/);
   }
 });
 
-test("smoke without a provider flag preserves the target's default selection", () => {
-  for (const scenario of ["success", "bad_local_default"]) {
-    const result = run(["--url", "https://smoke.example/api/inference"], scenario);
-    assert.equal(result.status, 0, result.output);
-    assert.ok(result.requests.every((request) => !new URL(request.url).searchParams.has("provider")));
+test("explicit smoke provider replaces all provider parameters in the remote URL", () => {
+  const result = run(["--provider", "gemini", "--model", "backend/model", "--url",
+    "https://smoke.example/api/inference?provider=ollama&provider=replit"]);
+  assert.equal(result.status, 0, result.output);
+  for (const request of result.requests) {
+    assert.deepEqual(new URL(request.url).searchParams.getAll("provider"), ["gemini"]);
   }
 });
 
@@ -185,7 +223,7 @@ test("smoke failures exit nonzero with useful endpoint errors", () => {
     ["missing_model", /invalid inference response/],
     ["raw_error", /HTTP 502: unexpected_error/],
   ]) {
-    const result = run(["--provider", "gemini", "--url", "https://smoke.example/api/inference"], scenario);
+    const result = run(["--provider", "gemini", "--model", "backend/model", "--url", "https://smoke.example/api/inference"], scenario);
     assert.equal(result.status, 1, result.output);
     assert.match(result.output, expected);
   }
@@ -193,15 +231,45 @@ test("smoke failures exit nonzero with useful endpoint errors", () => {
 
 test("smoke timeout tracks the local request budget plus 30 seconds", () => {
   for (const [configured,expected] of [["",120_000],["75000",75_000],["300000",170_000]]) {
-    const result = run(["--provider","replit"],"success",configured);
+    const result = run(["--provider","replit","--model","backend/model"],"success",configured);
     assert.equal(result.status,0,result.output);
     assert.deepEqual(result.timeouts,[expected+30_000,expected]);
   }
 });
 
 test("smoke timeout errors report the configured duration", () => {
-  const result = run(["--url","https://smoke.example/api/inference"],"timeout","1000");
+  const result = run(["--provider","replit","--model","backend/model","--url","https://smoke.example/api/inference"],"timeout","1000");
   assert.equal(result.status,1);
   assert.match(result.output,/Request timed out after 31 seconds/);
   assert.deepEqual(result.timeouts,[31_000]);
+});
+
+test("smoke requires a registered app and caller credentials with no provider-env fallback", () => {
+  const args = ["--provider", "replit", "--model", "backend/model"];
+  for (const app of [null, "unknown"]) {
+    const result = run(args, "success", "", app);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /--app is required/);
+    assert.equal(result.requests.length, 0);
+  }
+  for (const [scenario, expected] of [["missing_app_secret", /TRENDINGNOSTR_APP_SECRET/],
+    ["missing_caller_key", /INFERENCE_SMOKE_PROVIDER_KEY/]]) {
+    const result = run(args, scenario);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, expected);
+    assert.equal(result.requests.length, 0);
+  }
+});
+
+test("smoke does not print credential echoes or transport details and refuses redirects", () => {
+  const args = ["--provider", "replit", "--model", "backend/model", "--url", "https://smoke.example/api/inference"];
+  const echoed = run(args, "echo_secrets");
+  assert.equal(echoed.status, 0, echoed.output);
+  assert.match(echoed.output, /\[redacted\]/);
+  const transport = run(args, "transport_secret");
+  assert.equal(transport.status, 1);
+  assert.match(transport.output, /Request failed/);
+  const redirect = run(args, "redirect");
+  assert.equal(redirect.status, 1);
+  assert.equal(redirect.requests.length, 1);
 });

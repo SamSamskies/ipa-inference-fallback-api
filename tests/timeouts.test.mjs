@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import { readFileSync } from "node:fs";
 import test, { afterEach, beforeEach, mock } from "node:test";
 import handler from "../api/inference.js";
-import { PROVIDER_CONFIG } from "../lib/provider-config.js";
+import { providers } from "../lib/providers/registry.js";
 import { requestTimeoutMs, smokeTimeoutMs } from "../lib/timeouts.js";
 
-const envNames = ["INFERENCE_REQUEST_TIMEOUT_MS", "INFERENCE_FALLBACK_ENABLED",
-  "INFERENCE_CLIENT_DAILY_LIMIT", ...Object.values(PROVIDER_CONFIG).flatMap(({keyEnv, modelEnv}) => [keyEnv,modelEnv])];
+const envNames = ["REPLIT_MAX_TOKENS", "TRENDINGNOSTR_APP_SECRET", "INFERENCE_REQUEST_TIMEOUT_MS", "INFERENCE_FALLBACK_ENABLED",
+  "INFERENCE_CLIENT_DAILY_LIMIT", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY"];
 const originalFetch = globalThis.fetch;
 let previous;
 beforeEach(() => {
   previous = envNames.map((name) => process.env[name]);
   envNames.forEach((name) => delete process.env[name]);
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -43,7 +45,6 @@ test("request timeout is configurable and capped below Vercel's function deadlin
 
 test("all providers use the configured request deadline", async () => {
   process.env.INFERENCE_REQUEST_TIMEOUT_MS = "73000";
-  for (const {keyEnv} of Object.values(PROVIDER_CONFIG)) process.env[keyEnv] = "test-key";
   const deadlines = [];
   mock.method(AbortSignal,"timeout",(ms) => {
     deadlines.push(ms);
@@ -57,11 +58,11 @@ test("all providers use the configured request deadline", async () => {
     assert.equal(url,"https://samsamskies-inference.replit.app/api/v1/chat/completions");
     return Response.json({choices:[{message:{role:"assistant",content:"OK"}}]});
   };
-  for (const provider of Object.keys(PROVIDER_CONFIG)) {
+  for (const provider of Object.keys(providers)) {
     const res = {setHeader(){},status(code){this.statusCode=code;return this;},json(value){this.body=value;return this;}};
     await handler({method:"POST",url:`/api/inference?provider=${provider}`,
-      headers:{host:"example.test",origin:"https://example.test","x-inference-client":crypto.randomUUID()},
-      body:{messages:[{role:"user",content:"Test"}],webSearch:false}},res);
+      headers:{...appHeaders(),host:"example.test",origin:"https://example.test","x-inference-client":crypto.randomUUID()},
+      body:{model:"test-model",messages:[{role:"user",content:"Test"}],webSearch:false}},res);
     assert.equal(res.statusCode,200);
   }
   assert.deepEqual(deadlines,[73_000,73_000,73_000]);

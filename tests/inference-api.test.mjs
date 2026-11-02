@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 import { EventEmitter } from "node:events";
 import https from "node:https";
 import test, { afterEach, beforeEach, mock } from "node:test";
@@ -11,8 +12,7 @@ const SYSTEM_PROMPT_IMAGES_LINE =
 
 const originalFetch = globalThis.fetch;
 const originalLookupAll = imageFetchDns.lookupAll;
-const envNames = [
-  "DEFAULT_INFERENCE_PROVIDER",
+const envNames = ["TRENDINGNOSTR_APP_SECRET",
   "GEMINI_API_KEY",
   "INFERENCE_FALLBACK_ENABLED",
   "INFERENCE_CLIENT_DAILY_LIMIT",
@@ -25,8 +25,6 @@ beforeEach(() => {
   );
   envNames.forEach((key) => delete process.env[key]);
   process.env.GEMINI_API_KEY = "test-key-not-a-credential";
-  process.env.DEFAULT_INFERENCE_PROVIDER = "gemini";
-  process.env.GEMINI_MODEL = "test-model";
   process.env.INFERENCE_FALLBACK_ENABLED = "true";
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "50";
   globalThis.fetch = () => {
@@ -35,6 +33,7 @@ beforeEach(() => {
   imageFetchDns.lookupAll = async () => [
     { address: "203.0.113.10", family: 4 },
   ];
+  process.env.TRENDINGNOSTR_APP_SECRET = TEST_APP_SECRET;
 });
 afterEach(() => {
   mock.restoreAll();
@@ -49,6 +48,7 @@ afterEach(() => {
 function mockPinnedHttpsImage(bytes, contentType = "image/png") {
   const calls = [];
   mock.method(https, "request", (options, onResponse) => {
+    assert.doesNotMatch(JSON.stringify(options.headers), /test-key-not-a-credential|private-test-app-secret/);
     calls.push(options);
     const req = new EventEmitter();
     req.end = () =>
@@ -75,13 +75,13 @@ async function call({
   token = crypto.randomUUID(),
   body = { messages, webSearch: false },
   headers = {},
-  url = "/api/inference",
+  url = "/api/inference?provider=gemini",
 } = {}) {
   const req = {
     method,
     url,
-    headers: { host: "example.test", origin, "x-inference-client": token, ...headers },
-    body,
+    headers: { ...appHeaders("test-key-not-a-credential"), host: "example.test", origin, "x-inference-client": token, ...headers },
+    body: body && typeof body === "object" && !Array.isArray(body) ? { model: "test-model", ...body } : body,
   };
   const res = {
     statusCode: 200,
@@ -111,10 +111,9 @@ function success(content = "Nostr is an open protocol.") {
   });
 }
 
-test("missing hosted configuration reports unavailable without contacting a provider", async () => {
-  delete process.env.GEMINI_API_KEY;
-  const response = await call({ method: "GET" });
-  assert.equal(response.statusCode, 503);
+test("missing request credential fails without contacting a provider", async () => {
+  const response = await call({ method: "GET", headers: { "x-inference-provider-key": undefined } });
+  assert.equal(response.statusCode, 400);
   assert.equal(response.body.error, "missing_api_key");
 });
 
@@ -407,7 +406,6 @@ test("provider errors release the allowance so the user can retry", async () => 
 });
 
 test("hosted lightweight reasoning maps to Gemma's minimal setting", async () => {
-  process.env.GEMINI_MODEL = "gemma-4-31b-it";
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body);
     assert.deepEqual(body.generationConfig.thinkingConfig, {
@@ -417,7 +415,7 @@ test("hosted lightweight reasoning maps to Gemma's minimal setting", async () =>
     return success();
   };
   const response = await call({
-    body: { messages, webSearch: false, options: { reasoningEffort: "none" } },
+    body: { model: "gemma-4-31b-it", messages, webSearch: false, options: { reasoningEffort: "none" } },
   });
   assert.equal(response.statusCode, 200);
 });
@@ -473,7 +471,8 @@ test("probe, preflight and method handling preserve the HTTP contract", async ()
   assert.equal((await call({ method: "OPTIONS", origin: "https://other.test" })).statusCode, 403);
   assert.equal((await call({ method: "OPTIONS", origin: undefined, headers: { origin: undefined } })).statusCode, 204);
   assert.equal((await call({ method: "PUT" })).body.error, "method_not_allowed");
-  assert.equal((await call({ headers: { origin: undefined } })).body.error, "forbidden_origin");
+  globalThis.fetch = async () => success();
+  assert.equal((await call({ headers: { origin: undefined } })).statusCode, 200);
 });
 
 test("invalid JSON values, conversations and options fail before calling a provider", async () => {
@@ -508,14 +507,13 @@ test("Gemini reasoning maps across model families and auto omits thinking config
     ["gemini-3-flash-preview", "auto", undefined],
     ["gemini-3-flash-preview", undefined, undefined],
   ]) {
-    process.env.GEMINI_MODEL = model;
     globalThis.fetch = async (_url, init) => {
       const config = JSON.parse(init.body).generationConfig;
       assert.deepEqual(config.thinkingConfig, expected);
       assert.equal(config.temperature, 0);
       return success();
     };
-    assert.equal((await call({ body: { messages, webSearch: false,
+    assert.equal((await call({ body: { model, messages, webSearch: false,
       options: { reasoningEffort: effort, temperature: 0 } } })).statusCode, 200);
   }
 });
