@@ -10,7 +10,7 @@ The app backend supplies the provider, model, and provider API key for each
 inference request. Provider credentials are owned by the calling backends and
 are never resolved from shared-service environment settings or another request.
 The registry stores app identity and allowed providers. Service policy owns
-provider limits, including the Replit completion cap.
+provider limits, including an optional Replit completion cap.
 
 ## Local development
 
@@ -143,22 +143,23 @@ exits nonzero on failures. Its timeout is the configured request budget plus
 | `OLLAMA_MAX_CONCURRENT` | 2 active explanations across apps |
 | `TRENDINGNOSTR_APP_SECRET` | Required to authenticate TrendingNostr |
 | `ADVANCEDNOSTRSEARCH_APP_SECRET` | Required to authenticate AdvancedNostrSearch |
-| `REPLIT_MAX_TOKENS` | 16,384 total completion tokens for every Replit request, including reasoning and the final answer; service-owned positive decimal safe integer |
+| `REPLIT_MAX_TOKENS` | Optional service-owned cap, including reasoning and the final answer; positive decimal safe integer. Unset or blank omits `max_tokens` and uses gateway/upstream defaults |
 
-Replit always receives a completion cap: absent or blank `REPLIT_MAX_TOKENS` uses
-16,384. Invalid nonblank settings return `503 invalid_provider_config` for Replit
-probes and inference requests before quota reservation or upstream work; other
+There is no default Replit cap in this service. Absent or blank
+`REPLIT_MAX_TOKENS` omits `max_tokens` from upstream requests. Set it only to
+enforce a service-wide override. Invalid nonblank settings return
+`503 invalid_provider_config` for Replit probes and inference requests before
+quota reservation or upstream work; other
 providers are unaffected. Registered apps cannot override the cap through body,
 options, or query fields (`max_tokens`, `maxTokens`, and `max_completion_tokens`
 are ignored). Old app-specific cap settings are unused.
 
-The cap includes reasoning and visible answer tokens. The default is service
-policy, not a guarantee that every chosen model supports that value or finishes
-its answer within it. Verify the configured models with live smoke tests before
-rollout and tune the service setting as needed. Other numeric limits retain
-their existing positive-integer/default behavior. Rate limits remain in memory
-per process;
-Vercel instances do not share quota or concurrency state. Distributed limits and
+An explicit cap includes reasoning and visible answer tokens. Choose a value
+supported by the configured models and verify it with live smoke tests. Without
+an override, output limits follow the gateway/upstream behavior; this service
+does not assume the gateway has explicit per-model defaults. Other numeric limits
+retain their existing positive-integer/default behavior. Rate limits remain in
+memory per process; Vercel instances do not share quota or concurrency state. Distributed limits and
 spend safeguards remain in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
 
 There are no shared provider/model defaults or stored provider-key settings.
@@ -221,8 +222,9 @@ Each entry describes its capabilities and
 `generate(normalizedRequest, { model, apiKey, signal, maxTokens? })` function.
 The app resolver supplies the allowed adapter; the handler supplies the validated
 request model and request-local provider key explicitly. `lib/replit-limits.js`
-resolves the mandatory service-owned Replit cap, which the handler passes as
-`maxTokens`. Adapters continue to receive their configuration explicitly.
+resolves the optional service-owned Replit cap. The handler passes it as
+`maxTokens` when configured; otherwise the adapter omits `max_tokens`.
+Adapters continue to receive their configuration explicitly.
 
 The shared request format has `system`, `messages`, `options`, and `webSearch`.
 Messages use `user`/`assistant` roles and `parts` containing `{ text }` or

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { beforeEach, afterEach, mock } from "node:test";
 import handler from "../api/inference.js";
-import { DEFAULT_REPLIT_MAX_TOKENS, replitMaxTokens } from "../lib/replit-limits.js";
+import { replitMaxTokens } from "../lib/replit-limits.js";
 import { clientQuota } from "../lib/client-quota.js";
 import { appHeaders, TEST_APP_SECRET } from "./helpers/app-request.mjs";
 
@@ -26,9 +26,8 @@ afterEach(() => {
   });
 });
 
-test("Replit has a mandatory default cap and accepts only positive decimal safe integers", () => {
-  assert.equal(DEFAULT_REPLIT_MAX_TOKENS, 16384);
-  for (const [value, expected] of [[undefined,16384],["",16384],["  ",16384],
+test("Replit has no default cap and accepts only positive decimal safe-integer overrides", () => {
+  for (const [value, expected] of [[undefined,undefined],["",undefined],["  ",undefined],
     ["1",1],["8192",8192],[" 24576 ",24576]]) {
     if (value === undefined) delete process.env.REPLIT_MAX_TOKENS;
     else process.env.REPLIT_MAX_TOKENS = value;
@@ -53,10 +52,10 @@ async function call({ app = "trendingnostr", method = "POST", provider = "replit
   return res;
 }
 
-test("both apps always receive the service cap; legacy app settings and request overrides are ignored", async () => {
+test("both apps inherit upstream defaults unless the service overrides; caller and legacy app caps are ignored", async () => {
   process.env.TRENDINGNOSTR_REPLIT_MAX_TOKENS = "1";
   process.env.ADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS = "99999";
-  for (const configured of [undefined, "8192"]) {
+  for (const configured of [undefined, "", "  ", "8192"]) {
     if (configured === undefined) delete process.env.REPLIT_MAX_TOKENS;
     else process.env.REPLIT_MAX_TOKENS = configured;
     const sent = [];
@@ -70,7 +69,9 @@ test("both apps always receive the service cap; legacy app settings and request 
         options: { reasoningEffort: "high", maxTokens: 1, max_tokens: 99999 } },
     })));
     assert.deepEqual(responses.map((res) => res.statusCode), [200, 200]);
-    assert.deepEqual(sent.map((body) => body.max_tokens), [configured ? 8192 : 16384, configured ? 8192 : 16384]);
+    const overridden = Boolean(configured?.trim());
+    assert.deepEqual(sent.map((body) => body.max_tokens), [overridden ? 8192 : undefined, overridden ? 8192 : undefined]);
+    assert.ok(sent.every((body) => Object.hasOwn(body, "max_tokens") === overridden));
     assert.ok(sent.every((body) => body.reasoning_effort === "high"));
     assert.equal(process.env.REPLIT_MAX_TOKENS, configured);
   }

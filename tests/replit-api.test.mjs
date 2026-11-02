@@ -74,7 +74,7 @@ test("Replit sends native chat, reasoning and temperature to the fixed gateway",
     assert.equal(init.redirect,"error");
     assert.ok(init.signal instanceof AbortSignal);
     assert.deepEqual(JSON.parse(init.body),{model:MODEL,messages,stream:false,
-      max_tokens:16384,reasoning_effort:"none",temperature:0});
+      reasoning_effort:"none",temperature:0});
     return success();
   };
   const response=await call({body:{messages,webSearch:false,options:{reasoningEffort:"none",temperature:0}}});
@@ -95,8 +95,8 @@ test("requested Replit models override legacy env settings while gateway model I
   assert.equal(response.body.model,"actual/model");
 });
 
-test("Replit always sends the service completion cap and ignores caller caps", async () => {
-  for (const [configured, expected] of [[undefined,16384],["",16384],["4096",4096],["8192",8192]]) {
+test("Replit only sends a service-configured completion cap and ignores caller caps", async () => {
+  for (const [configured, expected] of [[undefined,undefined],["",undefined],["4096",4096],["8192",8192]]) {
     if (configured === undefined) delete process.env.REPLIT_MAX_TOKENS;
     else process.env.REPLIT_MAX_TOKENS = configured;
     globalThis.fetch = async (_url,init) => {
