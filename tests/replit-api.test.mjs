@@ -79,7 +79,7 @@ test("Replit sends native chat, reasoning and temperature to the fixed gateway",
   };
   const response=await call({body:{messages,webSearch:false,options:{reasoningEffort:"none",temperature:0}}});
   assert.equal(response.statusCode,200);
-  assert.deepEqual(response.body,{content:"Bonjour",model:MODEL});
+  assert.deepEqual(response.body,{content:"Bonjour",model:MODEL,provider:"replit"});
 });
 
 test("requested Replit models override legacy env settings while gateway model IDs are preserved", async () => {

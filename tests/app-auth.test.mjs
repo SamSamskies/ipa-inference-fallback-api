@@ -163,7 +163,7 @@ test("provider credential echoes are redacted from successful content and model 
   });
   const response = await call({ key });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.body, { content: "Echo: [redacted]", model: "[redacted]" });
+  assert.deepEqual(response.body, { content: "Echo: [redacted]", model: "[redacted]", provider: "replit" });
 });
 
 test("raw upstream failures and status fields cannot echo secrets into logs or error responses", async () => {

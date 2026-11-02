@@ -146,11 +146,11 @@ test("requests explicitly select either provider", async () => {
     assert.equal(init.headers.Authorization, "Bearer test-ollama-key");
     return success("Ollama answer");
   };
-  assert.deepEqual((await call({ url: "/api/inference?provider=gemini" })).body, { content: "Gemini answer", model: "gemini-test-model" });
+  assert.deepEqual((await call({ url: "/api/inference?provider=gemini" })).body, { content: "Gemini answer", model: "gemini-test-model", provider: "gemini" });
   assert.deepEqual((await call({ url: "/api/inference?provider=ollama" })).body,
-    { content: "Ollama answer", model: "gemma4:31b" });
+    { content: "Ollama answer", model: "gemma4:31b", provider: "ollama" });
   assert.deepEqual((await call({ url: "/api/inference?provider=gemini" })).body,
-    { content: "Gemini answer", model: "gemini-test-model" });
+    { content: "Gemini answer", model: "gemini-test-model", provider: "gemini" });
   assert.equal(paths.length, 3);
 });
 
@@ -228,9 +228,9 @@ test("concurrent provider selections keep their credentials and models separate"
     call({ url: "/api/inference?provider=gemini", body: { model: "gemini-test-model", messages, webSearch: false } }),
   ]);
   assert.equal(ollama.statusCode, 200);
-  assert.deepEqual(ollama.body, { content: "Ollama answer", model: "ollama-test-model" });
+  assert.deepEqual(ollama.body, { content: "Ollama answer", model: "ollama-test-model", provider: "ollama" });
   assert.equal(gemini.statusCode, 200);
-  assert.deepEqual(gemini.body, { content: "Gemini answer", model: "gemini-test-model" });
+  assert.deepEqual(gemini.body, { content: "Gemini answer", model: "gemini-test-model", provider: "gemini" });
 });
 
 test("the client daily limit is shared across provider selections", async () => {

@@ -1,34 +1,20 @@
 /** Hosted IPA fallback; provider-native behavior lives in lib/providers. */
 import { clientQuota } from "../lib/client-quota.js";
-import { appEnvNames } from "../lib/apps.js";
 import { authenticateApp, requestProviderKey } from "../lib/app-auth.js";
 import { resolveAppProviderConfig } from "../lib/app-config.js";
-import { envInt, loadLocalEnvFallback } from "../lib/env.js";
+import { envInt } from "../lib/env.js";
 import { capabilitiesForModel, getProvider } from "../lib/providers/registry.js";
 import { applyCapabilities, MAX_BODY_BYTES, normalizeModel, normalizeRequest } from "../lib/inference-request.js";
 import { prepareRequestImages } from "../lib/inference-images.js";
 import { sendInferenceError, withSources } from "../lib/inference-response.js";
 import { requestTimeoutMs } from "../lib/timeouts.js";
-import { replitMaxTokens } from "../lib/replit-limits.js";
+import { fallbackEnabled, providerRequestConfig } from "../lib/service-config.js";
 import { applyCors, INFERENCE_CLIENT_HEADER, originAllowed } from "../lib/http.js";
 
 // Preserve the existing DNS test seam while image handling lives in a shared helper.
 export { imageFetchDns } from "../lib/inference-images.js";
 
 const DEFAULT_CLIENT_DAILY = 50;
-loadLocalEnvFallback([
-  "INFERENCE_FALLBACK_ENABLED", "INFERENCE_CLIENT_DAILY_LIMIT", "INFERENCE_REQUEST_TIMEOUT_MS",
-  "OLLAMA_REQUESTS_PER_MINUTE", "OLLAMA_CLIENT_REQUESTS_PER_MINUTE", "OLLAMA_MAX_CONCURRENT",
-  "REPLIT_MAX_TOKENS",
-  ...appEnvNames(),
-], { exact: true });
-
-function fallbackEnabled() {
-  const flag = (process.env.INFERENCE_FALLBACK_ENABLED ?? "").trim().toLowerCase();
-  if (["0", "false", "off"].includes(flag)) return false;
-  return true;
-}
-
 function clientDailyLimit() {
   return envInt("INFERENCE_CLIENT_DAILY_LIMIT", DEFAULT_CLIENT_DAILY);
 }
@@ -84,7 +70,7 @@ export default async function handler(req, res) {
   try {
     selected = resolveAppProviderConfig(appId, providerId);
     apiKey = requestProviderKey(req);
-    if (providerId === "replit") maxTokens = replitMaxTokens();
+    ({ maxTokens } = providerRequestConfig(providerId));
   } catch (error) {
     sendInferenceError(res, error);
     return;
@@ -139,9 +125,12 @@ export default async function handler(req, res) {
 
   let request;
   let model;
+  let capabilities;
   try {
     request = normalizeRequest(body);
     model = normalizeModel(body?.model);
+    capabilities = capabilitiesForModel(adapter, model);
+    request = applyCapabilities(request, capabilities);
   } catch (error) {
     sendInferenceError(res, error);
     return;
@@ -160,16 +149,16 @@ export default async function handler(req, res) {
   }
 
   let release;
-  const capabilities = capabilitiesForModel(adapter, model);
   const signal = AbortSignal.timeout(requestTimeoutMs());
   try {
     release = adapter.acquire?.(scopedClientId);
-    const prepared = await prepareRequestImages(applyCapabilities(request, capabilities), signal, capabilities);
+    const prepared = await prepareRequestImages(request, signal, capabilities);
     const result = await adapter.generate(prepared, { model, apiKey, signal, maxTokens });
     await clientQuota.commit(reservation);
     res.status(200).json({
       content: withSources(result.content, result.sources).replaceAll(apiKey, "[redacted]"),
       model: result.model.replaceAll(apiKey, "[redacted]"),
+      provider: providerId,
     });
   } catch (error) {
     await clientQuota.release(reservation);
