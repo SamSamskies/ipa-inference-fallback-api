@@ -192,6 +192,16 @@ provider adapter registry.
 
 ### Registering another app and rotating secrets
 
+Generate a new app secret with:
+
+```sh
+npm run --silent generate:app-secret
+```
+
+Each run prints a new 256-bit cryptographically random, URL-safe secret. Copy it
+into the app's `*_APP_SECRET` server environment setting. The command only prints
+the value; it does not update environment files or Vercel settings.
+
 1. Add an entry to `lib/apps.js` with a unique lowercase app ID, `name`, boolean
    `enabled`, `authSecretEnv`, `defaultProvider`, and explicit `providers` map.
    Copy an existing entry and give **every** environment variable a new app
