@@ -3,9 +3,9 @@
 A shared fallback inference endpoint for apps using the Inference Provider API
 (IPA). Apps retain IPA-first routing, prompts, consent, and their server-side
 proxies; this service supplies reusable Ollama Cloud, Gemini, and Replit adapters.
-It runs as a Node ESM `/api/inference` function with no runtime package dependencies.
+It runs as Node ESM `/api/inference` and `/api/providers` functions with no runtime package dependencies.
 
-Every GET probe and POST inference request must authenticate a registered app.
+Every GET probe, provider-discovery request, and POST inference request must authenticate a registered app.
 The app backend supplies the provider, model, and provider API key for each
 inference request. Provider credentials are owned by the calling backends and
 are never resolved from shared-service environment settings or another request.
@@ -97,6 +97,40 @@ provider-key header. It returns `200 {"ok":true}` when the app/provider is enabl
 the credential is syntactically valid, and the fallback switch is on. The probe
 makes no upstream request and does not verify that the provider accepts the key.
 GET requires neither a model nor a client token.
+
+### Provider discovery
+
+`GET /api/providers` requires only `X-Inference-App` and
+`Authorization: Bearer <app secret>`. The app backend can proxy this metadata to
+its frontend. No provider key, model, or client token is needed. For example,
+the response includes entries like:
+
+```json
+{
+  "providers": [{
+    "id": "replit",
+    "capabilities": { "vision": true, "webSearch": true, "reasoning": true },
+    "models": [{
+      "id": "google/gemma-4-26b-a4b-it",
+      "capabilities": { "vision": true, "webSearch": true, "reasoning": true }
+    }]
+  }]
+}
+```
+
+Only the authenticated app's allowlisted, enabled providers are returned. Invalid
+local provider policy (such as an invalid `REPLIT_MAX_TOKENS`) omits that provider;
+an empty list is valid. Global fallback disable returns `503 disabled`.
+Responses use `Cache-Control: no-store` and contain no secrets, app configuration,
+upstream URLs, or default selection. Discovery makes no upstream calls or quota
+reservations, and does not check provider credentials or live availability.
+
+Capabilities are static transport defaults with effective overrides for the exact
+model IDs listed in the server registry. This is neither an exhaustive model
+catalog nor a model allowlist. Unknown models inherit the transport defaults;
+the app backend must choose and verify its models and keys. Discovery does not
+guarantee that an upstream model supports or will use a feature. Provider/model
+selection and credentials remain explicit on inference requests.
 
 Authenticated backend requests need no `Origin`. If an Origin is supplied, it
 must match the existing localhost/same-host/Vercel allowlist. CORS preflight
@@ -226,11 +260,12 @@ resolves the optional service-owned Replit cap. The handler passes it as
 `maxTokens` when configured; otherwise the adapter omits `max_tokens`.
 Adapters continue to receive their configuration explicitly.
 
-The shared request format has `system`, `messages`, `options`, and `webSearch`.
+The shared request format has `system`, `messages`, `options`, `webSearch`, and
+`requiredCapabilities`.
 Messages use `user`/`assistant` roles and `parts` containing `{ text }` or
 `{ image: { mediaType, data } }`. URL images initially contain
 `{ image: { mediaType, url } }`; shared image preparation downloads them before
-generation, retaining failed URLs as text. Shared helpers own validation, image
+generation, retaining failed URLs as text unless vision is required. Shared helpers own validation, image
 safety and size limits, stale vision-hint removal, source formatting, and HTTP
 error responses. Adapters own native message mapping, search, reasoning,
 response parsing, and provider-specific retry/error classification.
@@ -239,8 +274,10 @@ Registry entries define `capabilities: { vision, webSearch, reasoning }` and a
 `models` map of exact model IDs to partial capability overrides. For example,
 `models: { "your-text-model": { vision: false, reasoning: false } }` disables
 images and explicit reasoning controls for that requested model while inheriting
-the provider's search setting. Image URLs then remain text, inline images are
-omitted, and unsupported search/reasoning controls are omitted from native calls.
+the provider's search setting. Requests containing images then fail with
+`400 unsupported_capability` rather than losing image input. Unsupported optional
+search/reasoning controls are omitted from native calls; required ones fail
+before quota reservation, image fetching, or generation.
 These are server-owned settings; clients cannot override them. Defaults preserve
 the existing best-effort controls for requested models, including unknown model
 IDs; this metadata does not discover or guarantee upstream model support.
@@ -306,7 +343,22 @@ images are capped at 4,000,000 bytes each, and the total inline image payload
 after fetch cannot exceed 4,000,000 bytes (`413 payload_too_large`). Image fetches reject private/local
 destinations and credentials, validate all DNS answers and redirect hops, and pin
 the connection IP while retaining the original Host/TLS SNI. At most five
-redirects are followed. Failed image downloads become text URLs.
+redirects are followed. Failed image downloads become text URLs unless vision is
+required, in which case the entire request fails with `400 image_unavailable`
+without generation, even if some other images succeeded. The quota reservation
+is released.
+
+Use optional `requiredCapabilities: ["vision", "webSearch", "reasoning"]` to
+require configured support for those capabilities. The array may contain any
+subset, including an empty array; unknown values, duplicates, and non-arrays
+return `400 invalid_request`. Requiring `webSearch` while disabling it, or
+`reasoning` with `reasoningEffort: "none"`, is also invalid. An unsupported
+requirement returns `400 {"error":"unsupported_capability","capability":"vision"}`
+(or the relevant capability) before reserving quota or contacting upstreams.
+These requirements prevent service-side downgrades; they do not force the model
+to perform a search or expose reasoning. Ordinary upstream failures retain their
+existing error mappings. Supplied images always require configured vision support,
+even without this array; optional image downloads can still degrade to URL text.
 
 `webSearch` defaults to enabled when omitted. `false`, `0`, `"false"`, and `"off"`
 disable it; other non-boolean values return `400 invalid_request`. Ollama calls
@@ -320,7 +372,9 @@ enabled, it sends
 following [OpenRouter's hosted search format](https://openrouter.ai/docs/guides/features/server-tools/web-search).
 Returned `url_citation` annotations become source links. Replit uses OpenAI-compatible
 text/image messages and `reasoning_effort`; unsupported reasoning or temperature options get one retry without
-the rejected field, within the same deadline.
+the rejected field, within the same deadline. If reasoning is required, a rejected
+reasoning control returns `400 unsupported_capability` without a downgrade retry;
+an optional temperature retry still retains the required reasoning control.
 
 All providers append source links when needed. `reasoningEffort` accepts `auto`,
 `none`, `low`, `medium`, and `high`; it maps to each provider's existing thinking
@@ -328,12 +382,13 @@ settings. `temperature` accepts numbers from 0 through 2. App backends select th
 provider through the query parameter, model through the body, and provider key
 through its dedicated header. Provider base URLs remain fixed in the shared API.
 
-Successful requests return `200 {"content":"...","model":"..."}`. Errors retain
-their existing JSON shape and codes:
+Successful requests return `200 {"content":"...","model":"...","provider":"replit"}`
+with the selected provider ID. Errors retain their existing JSON shape and codes,
+plus the capability/image errors described above:
 
 | HTTP status | Error codes |
 | --- | --- |
-| 400 | `invalid_provider`, `missing_api_key`, `invalid_api_key`, `invalid_json`, `invalid_request`, `invalid_model`, `missing_client_token`, Gemini `provider_error` (with upstream `http` and optional `providerStatus`) |
+| 400 | `invalid_provider`, `missing_api_key`, `invalid_api_key`, `invalid_json`, `invalid_request`, `invalid_model`, `missing_client_token`, `unsupported_capability` (with `capability`), `image_unavailable`, Gemini `provider_error` (with upstream `http` and optional `providerStatus`) |
 | 401 | `unauthorized_app` |
 | 403 | `forbidden_origin`, `provider_not_allowed` |
 | 405 | `method_not_allowed` |

@@ -195,7 +195,7 @@ for (const [id, adapter] of Object.entries(providers)) {
     assert.equal(calls, 0);
   });
 
-  test(`${id} endpoint applies server model capability restrictions before image fetching and generation`, async () => {
+  test(`${id} endpoint filters optional search and reasoning using server model capabilities`, async () => {
     delete process.env.REPLIT_MAX_TOKENS;
     const model = "restricted-model";
     adapter.models[model] = { vision: false, webSearch: false, reasoning: false };
@@ -212,7 +212,6 @@ for (const [id, adapter] of Object.entries(providers)) {
       assert.equal(body.generationConfig?.thinkingConfig, undefined);
       assert.ok(!init.body.includes("AQID"));
       assert.ok(!init.body.includes(hint));
-      assert.ok(init.body.includes("https://127.0.0.1/photo.png"));
       assert.ok(init.body.includes("Answer in French."));
       return fixture.success();
     };
@@ -226,14 +225,12 @@ for (const [id, adapter] of Object.entries(providers)) {
           webSearch: true, options: { reasoningEffort: "high", temperature: 0 },
           messages: [{ role: "system", content: `Answer in French.\n${hint}` },
             { role: "user", content: [
-              { type: "image", mediaType: "image/png", data: "AQID" },
-              { type: "image", url: "https://127.0.0.1/photo.png" },
               { type: "text", text: "Describe this" },
             ] }],
         },
       }, res);
       assert.equal(res.statusCode, 200);
-      assert.deepEqual(res.body, { content: "Answer", model });
+      assert.deepEqual(res.body, { content: "Answer", model, provider: id });
       assert.equal(calls, 1);
     } finally {
       delete adapter.models[model];
@@ -243,6 +240,8 @@ for (const [id, adapter] of Object.entries(providers)) {
 
 test("capability filtering and image preparation leave the normalized request reusable", async () => {
   const normalized = request();
+  assert.throws(() => applyCapabilities(normalized, { vision: false }), { message: "unsupported_capability" });
+  normalized.messages.at(-1).parts = [{ text: "Hello" }];
   const before = structuredClone(normalized);
   const capabilities = { vision: false, webSearch: false, reasoning: false };
   const prepared = await prepareRequestImages(applyCapabilities(normalized, capabilities),

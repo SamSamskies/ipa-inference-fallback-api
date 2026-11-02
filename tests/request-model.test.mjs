@@ -105,7 +105,7 @@ for (const provider of providerIds) {
       body: JSON.stringify({ model: " backend/model:tag ", messages, webSearch: false }),
     });
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { content: "OK", model: "backend/model:tag" });
+    assert.deepEqual(res.body, { content: "OK", model: "backend/model:tag", provider });
     assert.equal(calls, 1);
   });
 
