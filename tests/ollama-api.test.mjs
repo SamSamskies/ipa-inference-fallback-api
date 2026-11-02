@@ -24,6 +24,7 @@ beforeEach(() => {
   previous = envNames.map((name) => process.env[name]);
   envNames.forEach((name) => delete process.env[name]);
   process.env.OLLAMA_API_KEY = "test-ollama-key";
+  process.env.DEFAULT_INFERENCE_PROVIDER = "ollama";
   process.env.INFERENCE_CLIENT_DAILY_LIMIT = "50";
   time += 120_000;
   Date.now = () => time;
@@ -80,7 +81,7 @@ async function call({ method = "POST", token = crypto.randomUUID(), body = { mes
   return res;
 }
 
-test("default backup talks directly to ollama.com with the cloud alias's API tag", async () => {
+test("Ollama backup talks directly to ollama.com with the cloud alias's API tag", async () => {
   process.env.GEMINI_MODEL = "gemini-only";
   assert.equal((await call({ method: "GET" })).statusCode, 200);
   globalThis.fetch = async (url, options) => {

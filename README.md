@@ -7,7 +7,7 @@ detection and decides when to use the fallback.
 
 The endpoint runs as a standalone Node ESM `/api/inference` function.
 Callers can select Ollama Cloud, Gemini, or the Replit gateway per request;
-Ollama Cloud is the default.
+Replit is the default.
 There are no runtime package dependencies or frontend/build framework dependencies.
 
 The existing origin checks and client token are not app authentication. Existing
@@ -29,9 +29,9 @@ a development project. Use the **Other** framework preset with no frontend build
 or development command. The script is named `dev:vercel` because Vercel rejects a
 `dev` script that recursively invokes itself. Secrets belong in `.env.local` or
 the Vercel environment; local env files are ignored by Git. The extracted env
-loader fills missing `DEFAULT_INFERENCE_PROVIDER`, `INFERENCE_`, `OLLAMA_`, and
-`GEMINI_` and `REPLIT_` values from `.env.local` then `.env`, without overriding existing
-nonempty environment values.
+loader fills missing `DEFAULT_INFERENCE_PROVIDER`, `INFERENCE_`, `OLLAMA_`,
+`GEMINI_`, `REPLIT_`, and registered app settings from `.env.local` then `.env`,
+without overriding existing nonempty environment values.
 
 `vercel.json` requests a [180 second function duration](https://vercel.com/docs/functions/configuring-functions/duration),
 supported on Hobby with Fluid Compute enabled. Each inference request has a
@@ -70,7 +70,7 @@ npm run smoke
 The script starts a temporary local HTTP server around the actual inference
 handler, probes configuration, and sends a short generation request to the chosen
 provider. No Vercel login or running development server is needed. Without
-`--provider`, it uses `DEFAULT_INFERENCE_PROVIDER` (Ollama when unset).
+`--provider`, it uses `DEFAULT_INFERENCE_PROVIDER` (Replit when unset).
 Keys and model settings load from `.env.local` using the same rules as the API.
 Override the selected provider's model for a single run with `--model`:
 
@@ -109,7 +109,7 @@ budget when testing a server with a different timeout. Use
 
 | Variable | Default / behavior |
 | --- | --- |
-| `DEFAULT_INFERENCE_PROVIDER` | `ollama`, `gemini`, or `replit`; defaults to `ollama`; used when the request omits `provider` |
+| `DEFAULT_INFERENCE_PROVIDER` | `ollama`, `gemini`, or `replit`; defaults to `replit`; used when the request omits `provider` |
 | `INFERENCE_FALLBACK_ENABLED` | Enabled when the selected provider has a key; `0`, `false`, or `off` disables it |
 | `INFERENCE_CLIENT_DAILY_LIMIT` | 50 successful requests per client token per UTC day |
 | `INFERENCE_REQUEST_TIMEOUT_MS` | 120,000 ms total per request; positive integer, capped at 170,000 ms; invalid values use the default |
@@ -132,6 +132,84 @@ cap can exhaust the budget before visible answer text is produced. All calls
 remain subject to the configured per-request total timeout (120 seconds by default).
 Numeric limits accept positive values, flooring them to integers; invalid values
 fall back to defaults.
+
+## Application registry
+
+`lib/apps.js` registers `trendingnostr` (TrendingNostr) and
+`advancednostrsearch` (AdvancedNostrSearch). Both apps are enabled, allow Ollama,
+Gemini, and Replit, and default to **Replit**. Every app/provider entry has its
+own model, API-key environment variable name, and optional model override.
+The registry is immutable and contains metadata and environment variable names;
+actual credentials belong in the shared API's server-side environment.
+
+This is the registry foundation for [issue #4](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/4).
+The current HTTP endpoint and smoke CLI still use the global configuration above.
+Authenticated proxy routing and provider discovery are tracked in
+[issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5);
+the registry does not authenticate an HTTP request or activate frontend migrations.
+
+| App | App secret | Provider key / optional model override |
+| --- | --- | --- |
+| TrendingNostr | `TRENDINGNOSTR_APP_SECRET` | `TRENDINGNOSTR_OLLAMA_API_KEY` / `TRENDINGNOSTR_OLLAMA_MODEL` |
+| | | `TRENDINGNOSTR_GEMINI_API_KEY` / `TRENDINGNOSTR_GEMINI_MODEL` |
+| | | `TRENDINGNOSTR_REPLIT_API_KEY` / `TRENDINGNOSTR_REPLIT_MODEL` |
+| AdvancedNostrSearch | `ADVANCEDNOSTRSEARCH_APP_SECRET` | `ADVANCEDNOSTRSEARCH_OLLAMA_API_KEY` / `ADVANCEDNOSTRSEARCH_OLLAMA_MODEL` |
+| | | `ADVANCEDNOSTRSEARCH_GEMINI_API_KEY` / `ADVANCEDNOSTRSEARCH_GEMINI_MODEL` |
+| | | `ADVANCEDNOSTRSEARCH_REPLIT_API_KEY` / `ADVANCEDNOSTRSEARCH_REPLIT_MODEL` |
+
+Built-in models match the provider defaults in the configuration table. Blank
+or absent app model overrides use the app registry model. Nonblank overrides are
+trimmed and must be at most 200 characters with no whitespace or control
+characters. Invalid values fail with `invalid_app_config`; there is no global
+model fallback. Optional `TRENDINGNOSTR_REPLIT_MAX_TOKENS` and
+`ADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS` accept positive decimal safe integers;
+blank values use gateway defaults. Invalid caps fail with `invalid_app_config`.
+
+`lib/app-config.js` exports `resolveAppProviderConfig(appId, providerId?)` for
+server code that has **already authenticated** the app ID. Omitted provider uses
+that app's default. The result has `appId`, `providerId`, `adapter`, `model`,
+`apiKey`, resolved model `capabilities`, and optional `maxTokens`, ready for the
+adapter's existing explicit configuration contract. It contains credentials and
+must stay inside server code; do not log it or return it to clients. App secret
+verification belongs at the HTTP boundary before calling this resolver.
+
+Resolution fails closed with sanitized error codes:
+
+| Status | Code / condition |
+| --- | --- |
+| 403 | `unknown_app`, `app_disabled`, or `provider_not_allowed` |
+| 400 | `invalid_provider` for an invalid explicit provider |
+| 503 | `provider_disabled`, `missing_api_key`, or `invalid_app_config` |
+
+A missing key affects only that app/provider. It never uses another app's key,
+an app secret, a global provider key, or another provider. A missing default
+provider key returns an error; it does not switch providers. `enabled: false` on
+an app disables its resolution; on a provider entry it disables that provider.
+Registry validation requires known providers, a registered/enabled default for
+enabled apps, valid metadata, and unique environment names across all app secrets,
+keys, model overrides, and token caps. Model capability metadata comes from the
+provider adapter registry.
+
+### Registering another app and rotating secrets
+
+1. Add an entry to `lib/apps.js` with a unique lowercase app ID, `name`, boolean
+   `enabled`, `authSecretEnv`, `defaultProvider`, and explicit `providers` map.
+   Copy an existing entry and give **every** environment variable a new app
+   prefix. Each provider requires `model` and `apiKeyEnv`; `enabled`, `modelEnv`,
+   and Replit's `maxTokensEnv` are optional. Providers outside that map are denied.
+2. Add the new environment names to `.env.example`. Configure separate provider
+   credentials in the shared Vercel project's relevant environments (or local
+   `.env.local`), and generate an independent app secret. Once authenticated
+   proxies are implemented, that app secret is shared only with its server-side
+   proxy; provider keys stay in the shared service. Registered environment names
+   are automatically picked up by the local env loader.
+3. Run `npm test`. Use `createAppConfigResolver(registry, env)` to test a custom
+   registry or environment without changing process-wide settings.
+4. Rotate a provider key by replacing only its app/provider environment value,
+   redeploying the shared service, verifying that app/provider, and revoking the
+   old key. App-secret rotation requires coordinating the shared service and its
+   authenticated proxy before revoking the old secret; this registry stores one
+   secret name per app. Never place secrets in Git, browser bundles, or logs.
 
 ## Provider adapters
 

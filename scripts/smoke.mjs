@@ -8,7 +8,7 @@ import { smokeTimeoutMs } from "../lib/timeouts.js";
 const HELP = `Usage: npm run smoke -- [--provider ${Object.keys(PROVIDER_CONFIG).join("|")}] [--model MODEL] [--url ENDPOINT]
 
 By default, start a temporary local server using keys from .env.local.
-Omit --provider to use DEFAULT_INFERENCE_PROVIDER (otherwise ollama).
+Omit --provider to use DEFAULT_INFERENCE_PROVIDER (otherwise replit).
 Use --model to override the selected provider's model for this local run only.
 Use --url to test an existing /api/inference endpoint with its own server keys.
 --model cannot be combined with --url; remote models are configured server-side.
@@ -72,7 +72,7 @@ async function main() {
   }
   const provider = values.provider !== undefined
     ? values.provider.trim().toLowerCase()
-    : process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
+    : process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "replit";
   if ((values.provider !== undefined || values.url === undefined) &&
     !Object.hasOwn(PROVIDER_CONFIG, provider)) {
     throw new Error(`Choose --provider ${Object.keys(PROVIDER_CONFIG).join(", ")}.`);

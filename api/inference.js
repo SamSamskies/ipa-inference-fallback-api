@@ -1,5 +1,6 @@
 /** Hosted IPA fallback; provider-native behavior lives in lib/providers. */
 import { clientQuota } from "../lib/client-quota.js";
+import { appEnvNames } from "../lib/apps.js";
 import { envInt, loadLocalEnvFallback } from "../lib/env.js";
 import { resolveProviderConfig } from "../lib/provider-config.js";
 import { getProvider } from "../lib/providers/registry.js";
@@ -13,10 +14,10 @@ import { applyCors, INFERENCE_CLIENT_HEADER, originAllowed } from "../lib/http.j
 export { imageFetchDns } from "../lib/inference-images.js";
 
 const DEFAULT_CLIENT_DAILY = 50;
-loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_"]);
+loadLocalEnvFallback(["DEFAULT_INFERENCE_PROVIDER", "INFERENCE_", "GEMINI_", "OLLAMA_", "REPLIT_", ...appEnvNames()]);
 
 function defaultProviderId() {
-  return process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "ollama";
+  return process.env.DEFAULT_INFERENCE_PROVIDER?.trim().toLowerCase() || "replit";
 }
 
 function fallbackEnabled(apiKey) {

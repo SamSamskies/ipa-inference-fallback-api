@@ -291,3 +291,21 @@ test("Replit can be the default while concurrent requests keep three providers s
   assert.deepEqual(responses.map((res)=>res.statusCode),[200,200,200]);
   assert.deepEqual(responses.map((res)=>res.body.model),["replit-model","ollama-model","gemini-model"]);
 });
+
+test("an unset or blank default selects Replit without using another provider's key", async () => {
+  for (const value of [undefined, "", "  "]) {
+    if (value === undefined) delete process.env.DEFAULT_INFERENCE_PROVIDER;
+    else process.env.DEFAULT_INFERENCE_PROVIDER = value;
+    globalThis.fetch = async (url, init) => {
+      assert.equal(url, URL);
+      assert.equal(init.headers.Authorization, "Bearer test-replit-key");
+      return success();
+    };
+    assert.equal((await call({ url: "/api/inference", method: "GET" })).statusCode, 200);
+    assert.equal((await call({ url: "/api/inference" })).statusCode, 200);
+  }
+  delete process.env.REPLIT_API_KEY;
+  process.env.OLLAMA_API_KEY = "other-provider-key";
+  process.env.GEMINI_API_KEY = "other-provider-key";
+  assert.equal((await call({ url: "/api/inference" })).body.error, "missing_api_key");
+});

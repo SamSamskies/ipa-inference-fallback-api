@@ -16,7 +16,7 @@ function readJsonLines(path) {
 function run(args, scenario = "success", requestTimeout = "") {
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=${scenario === "bad_local_default" ? "invalid" : scenario === "no_default" ? "" : "gemini"}\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
@@ -142,6 +142,14 @@ test("local smoke without a model override uses the provider's configured model"
     const result = run(["--provider", provider]);
     assert.equal(result.status, 0, result.output);
     assert.deepEqual(result.requests, [{provider, model:`configured-${provider}-model`}]);
+  }
+});
+
+test("local smoke defaults to Replit when no default is configured", () => {
+  for (const args of [[], ["--model", "custom/replit-model"]]) {
+    const result = run(args, "no_default");
+    assert.equal(result.status, 0, result.output);
+    assert.deepEqual(result.requests, [{ provider: "replit", model: args.length ? "custom/replit-model" : "configured-replit-model" }]);
   }
 });
 
