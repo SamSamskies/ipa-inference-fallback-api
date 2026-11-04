@@ -7,11 +7,10 @@ Vercel project. Its stable production base URL is
 The empty `public/` directory is the static output directory; application source
 under `lib/` is packaged for functions without being served as static files.
 
-**Current release gate:** inference is disabled until the app-keyed WAF rule can
-be provisioned and isolation verified. Vercel rejected that rule with
-`402 payment_required` on the current account. See the
-[validation record](deployment-validation.md) before enabling traffic. Neither
-frontend has been migrated.
+Inference is enabled with independently verified app buckets. The rule was
+published through the pinned Vercel CLI's staged configuration workflow, without
+a plan change or datastore. See the [validation record](deployment-validation.md)
+for tested features and remaining rollout checks. Neither frontend has been migrated.
 
 ## Ownership and configuration
 
@@ -92,8 +91,11 @@ See the [request contract](../README.md#server-to-server-requests).
    [production controls](production-controls.md) before changing the threshold.
    The [checked-in rule](../config/inference-app-rule.json) buckets by the SDK's
    `x-vercel-rate-limit-key` header; an empty key list would group all apps.
-   Confirm the account can publish that rule; do not replace its key list with
-   an empty list or an IP-only bucket to bypass a platform restriction.
+   Use the pinned CLI's stage/review/publish workflow from the production controls
+   runbook. The full-configuration PUT API returned `402 payment_required`, while
+   the CLI workflow successfully published the SDK header rule on this account.
+   Both an empty key list and IP-only counting failed live app isolation; retain
+   the explicit SDK header key and recheck both buckets after changing the rule.
 4. Enable [Protection Bypass for Automation](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation)
    and expose its `VERCEL_AUTOMATION_BYPASS_SECRET` to deployments. The firewall
    SDK calls the protected deployment hostname even when the production alias

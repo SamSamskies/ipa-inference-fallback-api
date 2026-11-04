@@ -2,8 +2,8 @@
 
 For the production hostname, app integration, release commands, and independent
 frontend rollback, see [deployment and integration](deployment.md).
-The production hostname is provisioned, but inference is currently disabled
-pending app-keyed WAF provisioning; see [deployment validation](deployment-validation.md).
+Inference is enabled with live-verified per-app admission buckets; see
+[deployment validation](deployment-validation.md) for results and remaining rollout checks.
 
 This service uses Node serverless functions. Its Maps survive only as long as a
 particular process does. They cannot enforce daily quotas, concurrency, request
@@ -41,20 +41,38 @@ deploying this change:
    update this setting too (10–600 seconds). It controls the conservative
    `Retry-After` advice; the **dashboard rule owns the window and request count**.
 
-For API-based provisioning, use the checked-in
+For CLI-based provisioning, use the checked-in
 [`inference-app` rule](../config/inference-app-rule.json). Its rate-limit bucket
 keys must be **`["header:x-vercel-rate-limit-key"]`**, the SDK's derived key.
-An empty `keys` array creates a shared bucket across apps even though the handler
-supplies `rateLimitKey`. Vercel's
+Both an empty `keys` array and IP-only counting pooled the two apps in live SDK
+tests even though the handler supplied distinct `rateLimitKey` values. Vercel's
 [official Terraform test fixture](https://github.com/vercel/terraform-provider-vercel/blob/main/vercel/resource_firewall_config_test.go)
-uses this header for SDK rules. Preserve other rules when updating an existing
-project; the [PUT configuration API](https://vercel.com/docs/rest-api/security/put-firewall-configuration)
-replaces the configuration. Recheck app isolation after provisioning.
-The current account rejected nonempty counting keys with `402 payment_required`.
-The [plan table](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting#limits)
-also restricts arbitrary header dimensions. Resolve account support with Vercel
-or approve an alternative shared counter before rollout; the SDK's documented
-custom-key behavior alone does not establish that a published rule isolates apps.
+uses this header for SDK rules. The pinned **Vercel CLI 65.11.0** successfully
+staged and published this SDK rule on the existing Hobby account. No subscription
+change or datastore was needed. Earlier full-configuration PUT requests returned
+`402 payment_required`; that did not establish that a plan upgrade was necessary.
+
+For a new project without an existing admission rule:
+
+```sh
+npx vercel firewall rules add --data "$(cat config/inference-app-rule.json)" --project ipa-inference-fallback-api --scope samsamskies-projects --yes
+npx vercel firewall rules inspect "Per-app inference admission" --project ipa-inference-fallback-api --scope samsamskies-projects --json
+npx vercel firewall publish --project ipa-inference-fallback-api --scope samsamskies-projects
+```
+
+For an existing rule, use `firewall rules update "Per-app inference admission"`
+with the same `--data` payload and project/scope. Review the staged changes and
+publish only the intended rule. In noninteractive use, `publish` returns the
+exact confirmation arguments and effects digest; follow the CLI's approval flow.
+`--yes` on its own does not approve publishing. Keep production inference disabled
+while commissioning a new rule; a protected preview can use an enabled switch.
+
+If updating via individual flags, include `--action rate_limit` along with
+`--rate-limit-window`, `--rate-limit-requests`, and `--rate-limit-keys`; an update
+containing only the key flag reported no changes in the tested CLI version.
+Do not overwrite unrelated rules through the full-configuration PUT API.
+Recheck app isolation after provisioning; a successful publish or GET probe alone
+does not establish separate counters.
 
 This consumes one WAF rate-limit rule in the project. Vercel currently allows
 one such rule on Hobby and 40 on Pro; both support fixed windows from 10 seconds

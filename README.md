@@ -16,8 +16,9 @@ provider limits, including an optional Replit completion cap.
 Production: `https://ipa-inference-fallback-api.vercel.app`. See the
 [deployment and integration runbook](docs/deployment.md) for environment ownership,
 port 3001 development, the smoke matrix, staged frontend migrations, and rollback.
-Inference is currently **disabled pending app-keyed rate-limit provisioning**;
-see the [deployment validation record](docs/deployment-validation.md).
+Inference is enabled with verified per-app admission limits. Neither frontend
+has been migrated; see the [deployment validation record](docs/deployment-validation.md)
+for tested features and remaining rollout checks.
 
 ## Local development
 
