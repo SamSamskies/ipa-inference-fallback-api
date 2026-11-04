@@ -36,13 +36,16 @@ the existing direct-provider route's environment variables:
 | `SHARED_INFERENCE_APP_SECRET` | The secret matching that app's registry entry |
 | `SHARED_INFERENCE_OLLAMA_API_KEY` | That app's distinct Ollama credential |
 | `SHARED_INFERENCE_GEMINI_API_KEY` | That app's distinct Gemini credential |
+| `SHARED_INFERENCE_REPLIT_API_KEY` | The same gateway key in both app backends; the gateway currently accepts one key |
 
 These names are an integration convention for the app proxies, not settings read
 by this service. Choose provider/model in backend code or backend-only settings;
-the shared service has no default provider or default model. Keep separate keys
-per app/provider for rotation and attribution. Distinct keys can still share a
-billing account and quota. Replit requires its own app credentials before an
-isolated Replit rollout; do not substitute one app's key for another's.
+the shared service has no default provider or default model. Ollama and Gemini
+use separate keys per app for rotation and attribution. Distinct keys can still
+share a billing account and quota. Replit intentionally uses the same gateway
+key in both app backends because the gateway currently accepts a single key.
+App authentication secrets and per-app service admission buckets remain separate.
+Rotate the Replit gateway key in both backends together.
 
 ## Local development with independent proxies
 

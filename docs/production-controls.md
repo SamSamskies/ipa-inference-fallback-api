@@ -152,7 +152,10 @@ needed: separate keys alone can share the same account quota or balance.
   models, search charges, and any automatic replenishment with its operator. This
   adapter maps HTTP 402 to `quota_exhausted`; that mapping does not establish that
   the gateway enforces a hard account spending cap. Use the optional
-  `REPLIT_MAX_TOKENS` cap after checking the selected models.
+  `REPLIT_MAX_TOKENS` cap after checking the selected models. The gateway currently
+  accepts one authentication key, intentionally shared by the two app backends.
+  Coordinate gateway-key rotation across both backends. Their separate app
+  authentication and service admission buckets still apply.
 
 Request limits do not bound cost precisely: model prices, output tokens,
 reasoning, images, search, and retries vary. Verify real controls in provider

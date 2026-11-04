@@ -12,8 +12,10 @@
   with system environment variables exposed. It contains no provider API keys.
 - Both app projects have staged `SHARED_INFERENCE_URL`,
   `SHARED_INFERENCE_APP_SECRET`, `SHARED_INFERENCE_OLLAMA_API_KEY`, and
-  `SHARED_INFERENCE_GEMINI_API_KEY` in Production/Preview. Existing routes do not
-  read these names. Neither frontend was migrated or redeployed.
+  `SHARED_INFERENCE_GEMINI_API_KEY` in Production/Preview. Both app backends also
+  have `SHARED_INFERENCE_REPLIT_API_KEY` set to the same gateway key, matching the
+  gateway's single-key authentication. Existing routes do not read these names.
+  Neither frontend was migrated or redeployed.
 - Firewall remains enabled. Active configuration version **5** has the
   `inference-app` SDK rule: **10 admitted requests per authenticated app per 60
   seconds**, fixed window, counting by `header:x-vercel-rate-limit-key`.
@@ -63,9 +65,9 @@ needed. Follow the [working CLI procedure](production-controls.md#shared-service
    and passes `--web-search`. Static discovery metadata does not prove support.
    This remains unvalidated and does not block working text/vision requests;
    use Ollama for the initially validated search path.
-2. **Replit isolation, if rolling out Replit:** the available local Replit keys
-   are shared between the two apps. Distinct app keys were not provisioned or
-   staged. Ollama/Gemini app keys are distinct and passed live generation.
+2. **Replit live validation:** run the smoke matrix for each app before its
+   Replit rollout. Sharing the gateway key is intentional and is not a release
+   blocker; app secrets and service admission limits remain independent.
 3. **Before public migration:** verify each app's public-proxy WAF controls and
    provider-account spending safeguards. Those external controls were not
    changed or certified by this deployment.

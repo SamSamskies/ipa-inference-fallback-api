@@ -96,6 +96,9 @@ const response = await fetch("https://your-service.vercel.app/api/inference?prov
 
 `REPLIT_API_KEY` above belongs to the **app backend** environment. It is not a
 shared-service setting. Each backend can use its own names for provider keys.
+Both registered apps intentionally use the same Replit gateway key because the
+gateway currently accepts one key. Their app authentication secrets and service
+admission limits remain separate; rotate the gateway key in both backends together.
 Use HTTPS between deployed backends. Provider destinations are fixed in the
 adapters, and credential-bearing requests reject redirects. Gemini uses
 `x-goog-api-key`, keeping credentials out of its request URL.
