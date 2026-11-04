@@ -1,29 +1,22 @@
-# First-pass production controls
+# Production controls
 
-For the production hostname, app integration, release commands, and independent
-frontend rollback, see [deployment and integration](deployment.md).
-Inference is enabled with live-verified per-app admission buckets; see
-[deployment validation](deployment-validation.md) for results and separate follow-ups.
+For configuration, releases, and rollback, see
+[deployment and integration](deployment.md). Shared-service admission is enabled
+with a published `inference-app` rule: 10 admitted POSTs per app per 60 seconds
+within a region.
 
-Both apps now use shared Replit inference in production. Under the owner's
-November 4, 2026 [rollout decision](https://github.com/SamSamskies/trendingnostr/issues/110),
-development rate-limit testing is accepted;
-production public-proxy WAF/rate-limit testing and provider spending verification
-are not migration or epic completion prerequisites. The owner subsequently deferred
-that extra hardening given low traffic and usage below existing limits;
-[issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6)
-is closed as not planned. Reopen if abuse, unexpected costs, sustained admission
-pressure, or increased usage warrants it. Existing shared admission remains in place.
-The procedures below remain available for future hardening; the deferred controls
-are not claimed as configured or verified.
+Public-proxy WAF rules and provider spending verification are optional hardening
+for the current low-traffic deployment. Revisit them if abuse, unexpected costs,
+sustained admission pressure, or increased usage warrants it. The sections below
+provide procedures; they do not certify those optional controls as configured.
 
 This service uses Node serverless functions. Its Maps survive only as long as a
 particular process does. They cannot enforce daily quotas, concurrency, request
 budgets, or cooldowns across Vercel instances or cold starts.
 
-The first pass uses Vercel's managed rate limiting and provider account controls,
-without Redis. Vercel's counters are shared across function instances **within a
-region**, not globally exact. A fixed window can admit a burst on either side of
+Shared admission uses Vercel's managed rate limiting without Redis. Vercel's
+counters are shared across function instances **within a region**, not globally
+exact. A fixed window can admit a burst on either side of
 a window boundary. This is traffic control, not exact success accounting or a
 dollar spending cap. See [Vercel WAF rate limiting](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting)
 and the [Rate Limiting SDK](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting-sdk).
@@ -32,7 +25,7 @@ and the [Rate Limiting SDK](https://vercel.com/docs/vercel-firewall/vercel-waf/r
 
 For a new deployment, configure this rule in the **shared fallback service's
 Vercel project** before enabling inference. The existing shared project already
-has the published, live-verified rule:
+has a published rule:
 
 1. Open **Firewall → Configure → New Rule**.
 2. Choose the **`@vercel/firewall`** condition and set the Rate Limit ID to
@@ -57,13 +50,9 @@ has the published, live-verified rule:
 For CLI-based provisioning, use the checked-in
 [`inference-app` rule](../config/inference-app-rule.json). Its rate-limit bucket
 keys must be **`["header:x-vercel-rate-limit-key"]`**, the SDK's derived key.
-Both an empty `keys` array and IP-only counting pooled the two apps in live SDK
-tests even though the handler supplied distinct `rateLimitKey` values. Vercel's
-[official Terraform test fixture](https://github.com/vercel/terraform-provider-vercel/blob/main/vercel/resource_firewall_config_test.go)
-uses this header for SDK rules. The pinned **Vercel CLI 65.11.0** successfully
-staged and published this SDK rule on the existing Hobby account. No subscription
-change or datastore was needed. Earlier full-configuration PUT requests returned
-`402 payment_required`; that did not establish that a plan upgrade was necessary.
+Empty keys or IP-only counting can pool apps instead of giving each one an
+independent bucket. Use the pinned Vercel CLI's stage/review/publish workflow and
+verify app isolation after changing the rule.
 
 For a new project without an existing admission rule:
 
@@ -82,20 +71,19 @@ while commissioning a new rule; a protected preview can use an enabled switch.
 
 If updating via individual flags, include `--action rate_limit` along with
 `--rate-limit-window`, `--rate-limit-requests`, and `--rate-limit-keys`; an update
-containing only the key flag reported no changes in the tested CLI version.
+containing only the key flag may not apply the intended change.
 Do not overwrite unrelated rules through the full-configuration PUT API.
 Recheck app isolation after provisioning; a successful publish or GET probe alone
 does not establish separate counters.
 
-This consumes one WAF rate-limit rule in the project. Vercel currently allows
-one such rule on Hobby and 40 on Pro; both support fixed windows from 10 seconds
-to 10 minutes. Check the linked plan limits and usage charges before rollout.
+This consumes one WAF rate-limit rule in the project. Check the linked Vercel
+plan limits and usage charges before adding rules or changing thresholds.
 
 Every valid authenticated POST with a client token checks `inference-app` using a
 server-derived key containing the app ID. Each app gets a separate bucket,
 shared across that app's providers and client IDs. Changing UUIDs, models,
 providers, or provider credentials does not create a new app bucket. Backend IPs
-are not used as identities. All apps use the same rule's threshold in this pass.
+are not used as identities. All apps use the same rule's threshold.
 
 The check runs before local daily reservation, image fetching, provider admission,
 and generation. It counts requests even when later local quota checks, image
@@ -122,10 +110,11 @@ requires equivalent external admission enforcement. GET probes and discovery
 do not consume admission budget or verify that the WAF rule exists: a successful
 probe is not proof that production inference will be admitted.
 
-## Public app proxies
+## Optional public-proxy hardening
 
-Apply a separate WAF rate-limit rule in **each calling application's project**
-to the public POST route that forwards inference. Use the real route from that
+If public-proxy abuse controls are needed, apply a separate WAF rate-limit rule
+in **each calling application's project** to the public POST route that forwards
+inference. Use the real route from that
 app's code; `/api/inference` here is the shared service route and is not
 necessarily the app's proxy route.
 
@@ -145,9 +134,9 @@ aggregate bound; it does not authenticate users or replace public-proxy controls
 IP rotation and traffic across multiple regions can still exceed the intended
 per-user rate. Public-proxy configuration is outside this repository.
 
-## Provider spending and account safeguards
+## Optional provider spending safeguards
 
-For every provider credential used by an app backend, record its owning account
+When reviewing provider exposure, record each credential's owning account
 or project, enabled models, billing arrangement, and the maximum acceptable
 exposure. Use separate billing projects/accounts when independent isolation is
 needed: separate keys alone can share the same account quota or balance.
@@ -172,18 +161,15 @@ needed: separate keys alone can share the same account quota or balance.
 
 Request limits do not bound cost precisely: model prices, output tokens,
 reasoning, images, search, and retries vary. Verify real controls in provider
-consoles if the deferred spending-safeguard work is resumed. If the account cannot impose
+consoles when setting up these safeguards. If the account cannot impose
 a hard cap, document that remaining exposure and an explicit shutdown threshold.
 
-## Operations and rollout validation
+## Validation and incident response
 
-1. Publish the shared admission rule before enabling shared inference. Configure
-   and validate public-proxy rules if the deferred work in issue #6 is resumed. Record project, rule ID,
-   threshold/window, region limitations, owner, and provider account settings
-   in the operator's private runbook; include no
-   secrets here. The shared admission rule is published and live-verified; the
-   public-proxy rules and provider spending verification are deferred hardening. See
-   [deployment validation](deployment-validation.md) for the recorded status.
+When changing admission rules, use a controlled preview to verify their behavior:
+
+1. Record project, rule ID, threshold/window, region limitations, and owner in
+   the operator's private runbook. Keep credentials out of the record.
 2. In a controlled preview, temporarily choose a small threshold and use dummy
    app/provider credentials. Send enough valid POSTs to observe admission and
    `429 rate_limited` with `Retry-After`. Invalid provider credentials can produce
@@ -197,7 +183,7 @@ a hard cap, document that remaining exposure and an explicit shutdown threshold.
    `503 rate_limit_unavailable` prevents provider calls. Confirm public proxies
    preserve 429/503 and retry headers, then restore the intended thresholds.
 5. Run a separately authorized live smoke only when needed to validate actual
-   provider access. Watch usage and errors during rollout. Do not log prompt
+   provider access. Watch usage and errors after releases. Do not log prompt
    bodies, full headers, raw upstream errors, or credential material. Configure
    platform redaction for `Authorization`, `X-Inference-Provider-Key`, upstream
    authorization headers, and automation bypass secrets. Avoid secret/header
@@ -215,14 +201,12 @@ secret changes between backend and service; the registry accepts one secret per
 app. Rotate any exposed automation bypass credential through Vercel. Verify
 recovery with sanitized responses, never by printing credentials.
 
-## Deferred exact accounting
+## Accounting limits
 
 The existing 50-successes/app/client/UTC-day allowance, failure refunds, Ollama
 attempt limits, concurrency, and cooldowns remain process-local safeguards.
 They reset on cold starts and can be multiplied by parallel instances. No exact
 global daily, service, app+provider, credential, or billing-account quota is
 implemented. Persistent shared state is required if those guarantees become
-necessary. These guarantees are explicitly outside the agreed first pass in
-[issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
-Reassess them as a separate enhancement if needed; they do not block completion
-of that issue's remaining public-proxy and provider-spending validation.
+necessary. Evaluate persistent accounting separately if exact guarantees become
+an operational requirement.
