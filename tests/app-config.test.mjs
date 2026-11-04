@@ -82,14 +82,14 @@ test("invalid app metadata and duplicate environment names are rejected", () => 
 test("local env loading includes all app secrets/settings and preserves injected values", () => {
   const directory = mkdtempSync(join(tmpdir(), "ipa-app-env-"));
   try {
-    writeFileSync(join(directory, ".env.local"), appEnvNames().map((name) => `${name}=local-value`).join("\n") + "\nOLLAMA_API_KEY=private-old-key\nGEMINI_API_KEY=private-old-key\nREPLIT_API_KEY=private-old-key\nINFERENCE_SMOKE_PROVIDER_KEY=private-caller-key\nREPLIT_MAX_TOKENS=24576\nTRENDINGNOSTR_REPLIT_MAX_TOKENS=1\nADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS=2");
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !appEnvNames().includes(name) && !/API_KEY$|INFERENCE_SMOKE_PROVIDER_KEY|REPLIT_MAX_TOKENS$/.test(name)));
+    writeFileSync(join(directory, ".env.local"), appEnvNames().map((name) => `${name}=local-value`).join("\n") + "\nOLLAMA_API_KEY=private-old-key\nGEMINI_API_KEY=private-old-key\nREPLIT_API_KEY=private-old-key\nREPLIT_MAX_TOKENS=24576\nTRENDINGNOSTR_REPLIT_MAX_TOKENS=1\nADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS=2");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !appEnvNames().includes(name) && !/API_KEY$|REPLIT_MAX_TOKENS$/.test(name)));
     env.TRENDINGNOSTR_APP_SECRET = "injected-value";
     const script = `
       await import(${JSON.stringify(new URL("../api/inference.js", import.meta.url).href)});
       const { appEnvNames } = await import(${JSON.stringify(new URL("../lib/apps.js", import.meta.url).href)});
       if (process.env.REPLIT_MAX_TOKENS !== "24576") process.exit(3);
-      for (const name of ["TRENDINGNOSTR_REPLIT_MAX_TOKENS", "ADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY", "INFERENCE_SMOKE_PROVIDER_KEY"]) {
+      for (const name of ["TRENDINGNOSTR_REPLIT_MAX_TOKENS", "ADVANCEDNOSTRSEARCH_REPLIT_MAX_TOKENS", "OLLAMA_API_KEY", "GEMINI_API_KEY", "REPLIT_API_KEY"]) {
         if (process.env[name] !== undefined) process.exit(2);
       }
       for (const name of appEnvNames()) {

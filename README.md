@@ -169,7 +169,7 @@ prompts for the selected provider's API key with hidden input in an interactive
 terminal. Type or paste the key and press Enter; Ctrl+C cancels. It is sent only
 in the provider-key HTTP header, without being saved to configuration, echoed,
 or included in command arguments. No provider-key flag or environment variable
-is needed; the old `INFERENCE_SMOKE_PROVIDER_KEY` setting is ignored.
+is needed.
 
 ```sh
 npm run smoke -- --app trendingnostr --provider ollama --model gemma4:cloud
