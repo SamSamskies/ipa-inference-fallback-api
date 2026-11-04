@@ -13,11 +13,11 @@ function readJsonLines(path) {
   catch (error) { if (error.code === "ENOENT") return []; throw error; }
 }
 
-function run(args, scenario = "success", requestTimeout = "", app = "trendingnostr") {
+function run(args, scenario = "success", requestTimeout = "", app = "trendingnostr", input = "private-smoke-provider-key\n") {
   if (app) args = ["--app", app, ...args];
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=replit\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\nTRENDINGNOSTR_APP_SECRET=${scenario === "missing_app_secret" ? "" : "private-smoke-app-secret"}\nINFERENCE_SMOKE_PROVIDER_KEY=${scenario === "missing_caller_key" ? "" : "private-smoke-provider-key"}\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=replit\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\nTRENDINGNOSTR_APP_SECRET=${scenario === "missing_app_secret" ? "" : "private-smoke-app-secret"}\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
@@ -25,6 +25,11 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
       import { appendFileSync } from "node:fs";
       import http from "node:http";
       import { syncBuiltinESMExports } from "node:module";
+      if (process.env.IPA_SMOKE_SCENARIO !== "noninteractive") {
+        Object.defineProperty(process.stdin, "isTTY", { value: true });
+        Object.defineProperty(process.stderr, "isTTY", { value: true });
+        process.stdin.setRawMode = (enabled) => { process.stdin.isRaw = enabled; };
+      }
       const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
       AbortSignal.timeout = (ms) => {
         appendFileSync("timeouts.jsonl", JSON.stringify(ms) + "\\n");
@@ -62,14 +67,16 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
           assert.equal(init.headers.Authorization, "Bearer private-smoke-provider-key");
           const model = JSON.parse(init.body).model;
           appendFileSync("requests.jsonl", JSON.stringify({provider:"ollama", model}) + "\\n");
-          return Response.json({message:{role:"assistant",content:"smoke test OK"}});
+          const content = JSON.parse(init.body).messages.at(-1).images ? "red" : "smoke test OK";
+          return Response.json({message:{role:"assistant",content}});
         }
         if (target.hostname === "generativelanguage.googleapis.com") {
           assert.equal(init.headers["x-goog-api-key"], "private-smoke-provider-key");
           assert.equal(target.search, "");
           const model = decodeURIComponent(target.pathname.split("/models/")[1].split(":generateContent")[0]);
           appendFileSync("requests.jsonl", JSON.stringify({provider:"gemini", model}) + "\\n");
-          return Response.json({candidates:[{content:{parts:[{text:"smoke test OK"}]}}]});
+          const content = JSON.parse(init.body).tools ? "See https://vercel.com/docs/cli" : "smoke test OK";
+          return Response.json({candidates:[{content:{parts:[{text:content}]}}]});
         }
         if (target.hostname === "samsamskies-inference.replit.app") {
           // The gateway serves its HTML SPA at the incorrect /v1 path.
@@ -82,6 +89,9 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
           return Response.json({choices:[{message:{role:"assistant",content:"smoke test OK"}}]});
         }
         assert.equal(init.redirect, "error");
+        if (process.env.IPA_SMOKE_SCENARIO === "protected") {
+          assert.equal(init.headers["x-vercel-protection-bypass"], "private-smoke-bypass-secret");
+        }
         assert.equal(init.headers.Authorization, "Bearer private-smoke-app-secret");
         assert.equal(init.headers["X-Inference-App"], "trendingnostr");
         assert.equal(init.headers["X-Inference-Provider-Key"], "private-smoke-provider-key");
@@ -92,7 +102,7 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
         const scenario = process.env.IPA_SMOKE_SCENARIO;
         if (scenario === "transport_secret") throw new Error("private-smoke-provider-key private-smoke-app-secret");
         if (scenario === "redirect") return new Response("", {status:302,headers:{Location:"https://untrusted.test"}});
-        if (scenario === "echo_secrets" && init.method === "POST") return Response.json({content:"private-smoke-app-secret private-smoke-provider-key",model:"private-smoke-provider-key"});
+        if (scenario === "echo_secrets" && init.method === "POST") return Response.json({content:"private-smoke-app-secret private-smoke-provider-key",model:"private-smoke-provider-key",provider:target.searchParams.get("provider")});
         if (scenario === "timeout") throw new DOMException("Timed out", "TimeoutError");
         if (scenario === "unreachable") throw new TypeError("fetch failed");
         if (scenario === "missing_key") return Response.json({error:"missing_api_key"}, {status:503});
@@ -103,13 +113,16 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
         if (scenario === "empty") return Response.json({content:"",model:"mock-model"});
         if (scenario === "missing_model") return Response.json({content:"smoke test OK"});
         if (scenario === "raw_error") return Response.json({error:"private-gemini-test-key"}, {status:502});
-        return Response.json({content:"smoke test OK",model:"mock-model"});
+        return Response.json({content:scenario === "wrong_color" ? "blue" : "smoke test OK",model:"mock-model",provider:scenario === "wrong_provider" ? "unknown" : target.searchParams.get("provider")});
       };
     `);
     const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-      !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|REPLIT_|TRENDINGNOSTR_|ADVANCEDNOSTRSEARCH_|NODE_OPTIONS)/.test(name)));
+      !/^(DEFAULT_INFERENCE_PROVIDER|INFERENCE_|GEMINI_|OLLAMA_|REPLIT_|TRENDINGNOSTR_|ADVANCEDNOSTRSEARCH_|VERCEL_|NODE_OPTIONS)/.test(name)));
     const result = spawnSync(process.execPath, ["--import", mockPath, script, ...args], {
-      cwd: directory, env: { ...env, DEFAULT_INFERENCE_PROVIDER: "replit", IPA_SMOKE_SCENARIO: scenario }, encoding: "utf8", timeout: 10_000,
+      cwd: directory, env: { ...env, DEFAULT_INFERENCE_PROVIDER: "replit", IPA_SMOKE_SCENARIO: scenario,
+        ...(scenario === "protected" ? { VERCEL_AUTOMATION_BYPASS_SECRET: "private-smoke-bypass-secret" } : {}),
+      }, encoding: "utf8", timeout: 10_000,
+      input: scenario === "empty_prompt" ? "\n" : scenario === "cancel_prompt" ? "\x03" : scenario === "closed_prompt" ? "" : input,
     });
     assert.ifError(result.error);
     assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
@@ -213,6 +226,13 @@ test("explicit smoke provider replaces all provider parameters in the remote URL
   }
 });
 
+test("protected remote smoke sends the automation bypass only as a header", () => {
+  const result = run(["--provider", "ollama", "--model", "gemma4:cloud", "--url", "https://smoke.example/api/inference"], "protected");
+  assert.equal(result.status, 0, result.output);
+  assert.doesNotMatch(result.output, /private-smoke-bypass-secret/);
+  for (const request of result.requests) assert.equal(new URL(request.url).searchParams.has("x-vercel-protection-bypass"), false);
+});
+
 test("smoke failures exit nonzero with useful endpoint errors", () => {
   for (const [scenario, expected] of [
     ["unreachable", /Could not reach the endpoint/],
@@ -224,10 +244,37 @@ test("smoke failures exit nonzero with useful endpoint errors", () => {
     ["empty", /invalid inference response/],
     ["missing_model", /invalid inference response/],
     ["raw_error", /HTTP 502: unexpected_error/],
+    ["wrong_provider", /invalid inference response/],
   ]) {
     const result = run(["--provider", "gemini", "--model", "backend/model", "--url", "https://smoke.example/api/inference"], scenario);
     assert.equal(result.status, 1, result.output);
     assert.match(result.output, expected);
+  }
+});
+
+test("extended local smoke exercises discovery and pre-admission failures before generation", () => {
+  const result = run(["--provider", "ollama", "--model", "gemma4:cloud", "--checks"]);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /Discovery, authentication, provider selector, and validation checks passed/);
+  assert.equal(result.requests.length, 1, "only the final valid POST may reach a provider");
+});
+
+test("vision and search smoke require the feature and check its response", () => {
+  const vision = run(["--provider", "ollama", "--model", "gemma4:cloud", "--vision"]);
+  assert.equal(vision.status, 0, vision.output);
+  assert.match(vision.output, /Response: red/);
+  const search = run(["--provider", "gemini", "--model", "gemma-4-31b-it", "--web-search"]);
+  assert.equal(search.status, 0, search.output);
+  assert.match(search.output, /https:\/\/vercel.com\/docs\/cli/);
+  const args = ["--provider", "ollama", "--model", "gemma4:cloud", "--url", "https://smoke.example/api/inference"];
+  for (const [flags, scenario, message] of [
+    [["--vision", "--web-search"], "success", /Run --vision and --web-search separately/],
+    [["--vision"], "wrong_color", /did not identify the red square/],
+    [["--web-search"], "success", /did not include an HTTPS source URL/],
+  ]) {
+    const result = run([...args, ...flags], scenario);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, message);
   }
 });
 
@@ -246,7 +293,7 @@ test("smoke timeout errors report the configured duration", () => {
   assert.deepEqual(result.timeouts,[31_000]);
 });
 
-test("smoke requires a registered app and caller credentials with no provider-env fallback", () => {
+test("smoke requires a registered app, app secret, and a valid prompted key without env fallback", () => {
   const args = ["--provider", "replit", "--model", "backend/model"];
   for (const app of [null, "unknown"]) {
     const result = run(args, "success", "", app);
@@ -255,11 +302,27 @@ test("smoke requires a registered app and caller credentials with no provider-en
     assert.equal(result.requests.length, 0);
   }
   for (const [scenario, expected] of [["missing_app_secret", /TRENDINGNOSTR_APP_SECRET/],
-    ["missing_caller_key", /INFERENCE_SMOKE_PROVIDER_KEY/]]) {
+    ["empty_prompt", /Enter a valid provider API key/],
+    ["cancel_prompt", /Provider key entry cancelled/],
+    ["closed_prompt", /Provider key entry cancelled/],
+    ["noninteractive", /interactive terminal/]]) {
     const result = run(args, scenario);
     assert.equal(result.status, 1, result.output);
     assert.match(result.output, expected);
     assert.equal(result.requests.length, 0);
+  }
+});
+
+test("smoke always prompts and rejects malformed key input before making requests", () => {
+  const args = ["--provider", "replit", "--model", "backend/model"];
+  const result = run(args);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /Provider API key \(hidden\):/);
+  for (const input of ["key with spaces\n", "key,with,commas\n", `${"x".repeat(8193)}\n`]) {
+    const invalid = run(args, "success", "", "trendingnostr", input);
+    assert.equal(invalid.status, 1, invalid.output);
+    assert.match(invalid.output, /Enter a valid provider API key/);
+    assert.equal(invalid.requests.length, 0);
   }
 });
 

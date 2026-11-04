@@ -1,0 +1,23 @@
+{
+  "name": "Per-app inference admission",
+  "active": true,
+  "conditionGroup": [
+    {
+      "conditions": [
+        { "type": "rate_limit_api_id", "op": "eq", "value": "inference-app" }
+      ]
+    }
+  ],
+  "action": {
+    "mitigate": {
+      "action": "rate_limit",
+      "rateLimit": {
+        "algo": "fixed_window",
+        "window": 60,
+        "limit": 10,
+        "keys": ["header:x-vercel-rate-limit-key"],
+        "action": "rate_limit"
+      }
+    }
+  }
+}
