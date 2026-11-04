@@ -293,7 +293,8 @@ This implements the registry from [issue #4](https://github.com/SamSamskies/ipa-
 and the authentication/routing portion of [issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5).
 Both frontend migrations are complete. Retiring duplicate direct-provider code
 and unused credentials after observation is tracked in
-[issue #16](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/16);
+[TrendingNostr #112](https://github.com/SamSamskies/trendingnostr/issues/112) and
+[AdvancedNostrSearch #56](https://github.com/SamSamskies/advancednostrsearch/issues/56);
 see the [rollout order and independent rollback](docs/deployment.md#staged-rollout-and-independent-rollback).
 
 ## Provider adapters

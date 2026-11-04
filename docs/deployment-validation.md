@@ -122,7 +122,7 @@ needed. Follow the [working CLI procedure](production-controls.md#shared-service
    currently select Replit.
 2. **Deferred production controls — [#6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6), closed as not planned:** revisit public-proxy rules and
    provider-account spending verification if usage, costs, or abuse warrants it.
-3. **Cleanup after observation — [#16](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/16):** retire duplicated direct-provider code and unused
+3. **App-owned cleanup — [TrendingNostr #112](https://github.com/SamSamskies/trendingnostr/issues/112) and [AdvancedNostrSearch #56](https://github.com/SamSamskies/advancednostrsearch/issues/56):** retire duplicated direct-provider code and unused
    keys only after independent rollback no longer needs them. Preserve active
    credentials and check spam detection and other consumers before revocation.
 

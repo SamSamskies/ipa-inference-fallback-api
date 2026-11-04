@@ -187,7 +187,8 @@ Retain the following staged procedure for future integrations and rollback:
    valid through the agreed observation period. Migrate AdvancedNostrSearch in
    its own PR with the same checks and its own rollback target.
 4. **Remove duplicated code and old keys last** under
-   [issue #16](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/16), after both apps have passed
+   [TrendingNostr #112](https://github.com/SamSamskies/trendingnostr/issues/112) and
+   [AdvancedNostrSearch #56](https://github.com/SamSamskies/advancednostrsearch/issues/56), after both apps have passed
    their observation periods and rollback no longer depends on those keys.
    Inspect other consumers before revocation: TrendingNostr's spam detection
    may share its existing Ollama credential, and its `OLLAMA_MODEL` setting is
