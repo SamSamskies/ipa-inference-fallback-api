@@ -5,6 +5,10 @@
 - Project: `samsamskies-projects/ipa-inference-fallback-api`.
 - Stable production base: `https://ipa-inference-fallback-api.vercel.app`.
 - Runtime pinned to Node 24; static output restricted to the empty `public/` directory.
+- Implementation PRs [#12](https://github.com/SamSamskies/ipa-inference-fallback-api/pull/12)
+  and [#13](https://github.com/SamSamskies/ipa-inference-fallback-api/pull/13) are
+  merged. The November 4 post-merge check found production READY on Node 24 at
+  source `edfc9039c9ecb29c98983a31b7b50f188b3e8f66`; its authenticated probe returned 200.
 - `INFERENCE_FALLBACK_ENABLED=true` in Production and Preview after the deployed
   app-isolation test passed. App authentication still rejects unauthenticated
   requests. Local development also supports its own enable switch.
@@ -29,9 +33,10 @@
 | Check | Result |
 | --- | --- |
 | Full test suite using the explicit Node 24.12.0 binary | 183 passed |
+| Focused admission, client-quota, and Ollama-limit tests after merge | 27 passed |
 | Hidden provider-key prompt | Terminal entry produced no key echo; editing, cancellation, EOF, input validation, and terminal-mode restoration passed |
 | `vercel dev --listen 3001` | Authenticated discovery and configuration probe passed |
-| Stable production alias without automation bypass | App-authenticated probe succeeded before disable; unauthenticated discovery returned JSON 401 |
+| Stable production alias without automation bypass | Authenticated probe passed after re-enabling and after merge; unauthenticated discovery returned JSON 401 |
 | Both apps × Ollama/Gemini | GET probe, discovery, negative checks, and real POST generation passed with separate app/provider credentials |
 | Provider/model selection | Ollama `gemma4:cloud` returned native `gemma4:31b`; Gemini `gemma-4-31b-it` returned the selected model |
 | Auth and request errors | Missing/wrong app auth, missing keys, missing/duplicate provider selector, malformed JSON, and missing models returned expected sanitized errors |
@@ -49,10 +54,19 @@
 | Response credential checks | Selected app/provider/bypass credentials absent from successful probes, discovery, negative responses, and generation responses in `--checks` runs |
 | Static output on corrected Node 24 preview | `/lib/app-auth.js`, `/.env.local`, and `/package.json` returned 404; API routes remained available |
 
-Initial provider generation/feature checks ran before the temporary disable.
-The API/adapters are unchanged; generation is rechecked after re-enabling. A
-response containing a URL does not independently prove upstream search execution
-or charges.
+After re-enabling production, both apps passed Ollama/Gemini text generation and
+Ollama passed vision/search again. The post-merge check confirmed the merged
+production deployment was READY and its authenticated probe passed. A response
+containing a URL does not independently prove upstream search execution or charges.
+
+## Issue #6 rollout status
+
+The November 4 read-only configuration check found the shared-service rule active
+at version 5, with no pending draft. Neither TrendingNostr nor AdvancedNostrSearch
+had a published or draft project firewall configuration. Their public-proxy WAF
+rules still need configuration and validation. Provider spending/credit settings
+remain unverified. Issue #6 stays open for those external controls; exact global
+quotas and persistent accounting are explicitly outside its agreed first pass.
 
 ## Resolution and remaining rollout checks
 
