@@ -165,7 +165,8 @@ absent reasoning uses provider defaults, with explicit caller options forwarded.
 The owner accepted development rate-limit testing for this rollout. Production
 public-proxy WAF/rate-limit testing and provider spending verification are separate
 hardening under [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6),
-not migration completion prerequisites. They are not claimed as verified.
+now closed as not planned given low traffic and usage below existing limits.
+Revisit if usage, costs, or abuse warrants it. These controls are not claimed as verified.
 Gemini search stays gated pending [issue #15](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/15).
 
 Retain the following staged procedure for future integrations and rollback:

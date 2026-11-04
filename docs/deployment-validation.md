@@ -101,8 +101,11 @@ settings remain unverified. The owner's later rollout decision accepts developme
 rate-limit testing and does not require production public-proxy WAF/rate-limit
 testing or spending verification to complete these migrations or the epic.
 This is not a claim that those controls were verified in production.
-Issue #6 stays open as separate hardening for those external controls; exact global
-quotas and persistent accounting remain outside its agreed first pass.
+The owner subsequently deferred this extra hardening given low traffic and usage
+well below existing limits; issue #6 is closed as not planned. Reopen it if abuse,
+unexpected costs, sustained admission pressure, or increased usage warrants it.
+Existing shared admission remains in place. Exact global quotas and persistent
+accounting remain outside the agreed first pass.
 
 ## Resolution and separate follow-ups
 
@@ -117,8 +120,8 @@ needed. Follow the [working CLI procedure](production-controls.md#shared-service
    This remains unvalidated and does not block working text/vision requests;
    keep app-proxy Gemini search gated until validated. Both production apps
    currently select Replit.
-2. **Production controls — [#6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6):** configure/validate public-proxy rules and verify
-   provider-account spending safeguards separately under the accepted scope above.
+2. **Deferred production controls — [#6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6), closed as not planned:** revisit public-proxy rules and
+   provider-account spending verification if usage, costs, or abuse warrants it.
 3. **Cleanup after observation — [#16](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/16):** retire duplicated direct-provider code and unused
    keys only after independent rollback no longer needs them. Preserve active
    credentials and check spam detection and other consumers before revocation.
