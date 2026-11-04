@@ -167,7 +167,9 @@ public-proxy WAF/rate-limit testing and provider spending verification are separ
 hardening under [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6),
 now closed as not planned given low traffic and usage below existing limits.
 Revisit if usage, costs, or abuse warrants it. These controls are not claimed as verified.
-Gemini search stays gated pending [issue #15](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/15).
+Gemini search stays gated. [Issue #15](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/15)
+is closed as not planned because both apps use Replit. If Gemini is selected in
+the future, validate the chosen model/key before enabling search.
 
 Retain the following staged procedure for future integrations and rollback:
 

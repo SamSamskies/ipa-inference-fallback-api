@@ -115,11 +115,11 @@ workflow accepted the explicit SDK header rule. Live tests established separate
 counters on this account. The failed PUT calls did not prove that an upgrade was
 needed. Follow the [working CLI procedure](production-controls.md#shared-service-admission-rule).
 
-1. **Gemini search — [#15](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/15):** establish a model/key combination that supports live search
-   and passes `--web-search`. Static discovery metadata does not prove support.
-   This remains unvalidated and does not block working text/vision requests;
-   keep app-proxy Gemini search gated until validated. Both production apps
-   currently select Replit.
+1. **Gemini search — [#15](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/15), closed as not planned:** both production apps use Replit and no Gemini
+   switch is currently planned. If Gemini is adopted later, evaluate the selected
+   model/key then; the owner expects to consider paid access. Validate live search
+   before enabling the existing app-proxy gate. Neither static metadata nor paid
+   access alone establishes search support. Existing text/vision checks are unaffected.
 2. **Deferred production controls — [#6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6), closed as not planned:** revisit public-proxy rules and
    provider-account spending verification if usage, costs, or abuse warrants it.
 3. **App-owned cleanup — [TrendingNostr #112](https://github.com/SamSamskies/trendingnostr/issues/112) and [AdvancedNostrSearch #56](https://github.com/SamSamskies/advancednostrsearch/issues/56):** retire duplicated direct-provider code and unused
