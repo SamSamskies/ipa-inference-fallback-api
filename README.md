@@ -231,7 +231,9 @@ allowance and Ollama limits/cooldowns remain in memory per process; Vercel
 instances do not share those counters. The Vercel admission check adds a separate
 per-app request budget across instances within a region. It counts admitted
 POSTs, including later failures, and is never refunded. Exact daily accounting
-and global budgets remain deferred in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+and global budgets are explicitly outside the agreed first-pass scope of
+[issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6);
+reassess persistent shared accounting separately if those guarantees are needed.
 See [production controls](docs/production-controls.md) for WAF setup, provider
 spending safeguards, public-proxy controls, emergency shutdown, and rotation.
 

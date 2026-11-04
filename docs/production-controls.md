@@ -167,8 +167,9 @@ cap, document that remaining exposure and an explicit shutdown threshold.
 1. Publish the shared admission rule and public-proxy rules before exposing
    traffic. Record project, rule ID, threshold/window, region limitations, owner,
    and provider account settings in the operator's private runbook; include no
-   secrets here. No firewall, billing, or deployment settings are changed by this
-   source patch.
+   secrets here. The shared admission rule is published and live-verified; the
+   public-proxy rules and provider spending settings remain rollout work. See
+   [deployment validation](deployment-validation.md) for the recorded status.
 2. In a controlled preview, temporarily choose a small threshold and use dummy
    app/provider credentials. Send enough valid POSTs to observe admission and
    `429 rate_limited` with `Retry-After`. Invalid provider credentials can produce
@@ -207,4 +208,7 @@ attempt limits, concurrency, and cooldowns remain process-local safeguards.
 They reset on cold starts and can be multiplied by parallel instances. No exact
 global daily, service, app+provider, credential, or billing-account quota is
 implemented. Persistent shared state is required if those guarantees become
-necessary. Track the broader limitations in [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+necessary. These guarantees are explicitly outside the agreed first pass in
+[issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+Reassess them as a separate enhancement if needed; they do not block completion
+of that issue's remaining public-proxy and provider-spending validation.
