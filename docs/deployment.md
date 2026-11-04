@@ -7,11 +7,6 @@ Vercel project. Its stable production base URL is
 The empty `public/` directory is the static output directory; application source
 under `lib/` is packaged for functions without being served as static files.
 
-Inference is enabled with independently verified app buckets. The rule was
-published through the pinned Vercel CLI's staged configuration workflow, without
-a plan change or datastore. See the [validation record](deployment-validation.md)
-for tested features and remaining rollout checks. Neither frontend has been migrated.
-
 ## Ownership and configuration
 
 | Location | Settings and responsibility |
@@ -27,8 +22,7 @@ other browser-exposed prefix. `.env.local`, `.env`, and `.vercel` stay ignored;
 `.vercelignore` also excludes local environment files from CLI uploads.
 Do not put provider keys or the smoke caller key on the shared deployment.
 
-The app migrations can adopt these staged backend-only settings without changing
-the existing direct-provider route's environment variables:
+The app proxies use these backend-only settings:
 
 | App-backend variable | Value / use |
 | --- | --- |
@@ -66,9 +60,10 @@ a separate terminal on a free port (for example TrendingNostr on 3000 and
 AdvancedNostrSearch on 3002). In each app's ignored backend environment, set
 `SHARED_INFERENCE_URL=http://127.0.0.1:3001/api/inference`, its matching local app
 secret, and that app's provider keys. The browser calls its own proxy; only the
-proxy calls port 3001. App migrations must implement this forwarding before
-these settings take effect. Local Vercel development skips the managed admission
-check, so validate that check on a deployment too.
+proxy calls port 3001.
+AdvancedNostrSearch retains its Vite development middleware; run it with that
+app's `npm run dev`. Local development skips the managed admission check, so
+validate that check on a deployment too.
 Do not add a `dev` script that runs `vercel dev`: the pinned CLI detects that as
 a recursive development command and refuses to start.
 
@@ -95,10 +90,8 @@ See the [request contract](../README.md#server-to-server-requests).
    The [checked-in rule](../config/inference-app-rule.json) buckets by the SDK's
    `x-vercel-rate-limit-key` header; an empty key list would group all apps.
    Use the pinned CLI's stage/review/publish workflow from the production controls
-   runbook. The full-configuration PUT API returned `402 payment_required`, while
-   the CLI workflow successfully published the SDK header rule on this account.
-   Both an empty key list and IP-only counting failed live app isolation; retain
-   the explicit SDK header key and recheck both buckets after changing the rule.
+   runbook. Retain the explicit SDK header key and recheck both app buckets
+   after changing the rule; empty keys or IP-only counting can pool the apps.
 4. Enable [Protection Bypass for Automation](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation)
    and expose its `VERCEL_AUTOMATION_BYPASS_SECRET` to deployments. The firewall
    SDK calls the protected deployment hostname even when the production alias
@@ -128,11 +121,11 @@ environment variables, or piped input. For protected deployment URLs also set
 headers, never CLI arguments. These tests make real provider calls and use quota.
 
 ```sh
-npm run smoke -- --app trendingnostr --provider ollama --model gemma4:cloud --checks --url https://ipa-inference-fallback-api.vercel.app/api/inference
-npm run smoke -- --app advancednostrsearch --provider gemini --model gemma-4-31b-it --checks --url https://ipa-inference-fallback-api.vercel.app/api/inference
-# Repeat both providers for both apps, then test each feature separately:
-npm run smoke -- --app trendingnostr --provider ollama --model gemma4:cloud --vision --url https://ipa-inference-fallback-api.vercel.app/api/inference
-npm run smoke -- --app trendingnostr --provider ollama --model gemma4:cloud --web-search --url https://ipa-inference-fallback-api.vercel.app/api/inference
+npm run smoke -- --app trendingnostr --provider replit --model google/gemma-4-26b-a4b-it --checks --url https://ipa-inference-fallback-api.vercel.app/api/inference
+npm run smoke -- --app advancednostrsearch --provider replit --model google/gemma-4-26b-a4b-it --checks --url https://ipa-inference-fallback-api.vercel.app/api/inference
+# Check features separately for the selected app/provider/model:
+npm run smoke -- --app trendingnostr --provider replit --model google/gemma-4-26b-a4b-it --vision --url https://ipa-inference-fallback-api.vercel.app/api/inference
+npm run smoke -- --app trendingnostr --provider replit --model google/gemma-4-26b-a4b-it --web-search --url https://ipa-inference-fallback-api.vercel.app/api/inference
 ```
 
 `--checks` verifies authenticated discovery, missing/incorrect app auth, missing
@@ -147,46 +140,27 @@ use provider usage evidence when verifying search billing/execution.
 Test invalid upstream credentials/models separately and expect a sanitized
 provider error (see the [error table](../README.md#request-and-response-contract)).
 Validate deployed 429/503 and app-bucket isolation using dummy provider keys as
-described in [production controls](production-controls.md#operations-and-rollout-validation).
+described in [production controls](production-controls.md#validation-and-incident-response).
 Do not load-test a paid model to test the admission threshold.
 
-## Staged rollout and independent rollback
+## Rollback
 
-1. **Deploy and verify the shared API.** Record its production deployment and
-   source commit. Provision app credentials and verify public-proxy WAF controls
-   and provider spending safeguards before switching public traffic.
-2. **Migrate TrendingNostr first** in its own PR/deployment. Keep IPA-first routing,
-   prompts, consent, browser behavior, and its old direct-provider route/code
-   available. Add a backend routing switch (for example
-   `SHARED_INFERENCE_ENABLED`) so a deployment can choose the shared proxy or old
-   implementation. Record the pre-migration app commit/deployment and existing
-   direct-provider environment settings. Test discovery, generation, images,
-   search, auth failures, and 429/503 propagation through the public proxy.
-3. **Observe TrendingNostr** before migrating AdvancedNostrSearch independently.
-   Compare success/error rates and latency with its previous deployment; inspect
-   provider usage/costs and admission failures. Keep both paths and credentials
-   valid through the agreed observation period. Migrate AdvancedNostrSearch in
-   its own PR with the same checks and its own rollback target.
-4. **Remove duplicated code and old keys last**, after both apps have passed
-   their observation periods and rollback no longer depends on those keys.
-   Inspect other consumers before revocation: TrendingNostr's spam detection
-   may share its existing Ollama credential, and its `OLLAMA_MODEL` setting is
-   distinct from inference's `OLLAMA_INFERENCE_MODEL`. Revoke unused provider
-   credentials at the provider, remove obsolete Vercel settings, and redeploy
-   affected apps. Remove old routes in separate cleanup commits.
+Record a known-good deployment URL and source commit before each release.
 
-To roll back **one frontend**, disable its shared-routing switch and redeploy
-that app, or run `npx vercel rollback <PRE_MIGRATION_DEPLOYMENT_URL>` from that
-app's linked project. Verify its IPA/fallback flow, model, and errors. Leave the
-other frontend on its working deployment. Retain the original app commits and
-deployment URLs until the observation period ends; rollback depends on their
-credentials remaining valid.
+To roll back **the shared service**, run
+`npx vercel rollback <KNOWN_GOOD_SHARED_DEPLOYMENT_URL>` from this repository,
+then verify both apps' availability and normal inference. A deployment rollback
+restores its configuration snapshot; confirm its app secrets remain valid.
 
-To roll back **the shared service**, use
-`npx vercel rollback <KNOWN_GOOD_SHARED_DEPLOYMENT_URL>` from this repository and
-recheck both apps. For the initial release there is no previous shared release:
-return migrated apps to their retained direct routes. For emergency shutdown,
-follow the [kill-switch instructions](production-controls.md#operations-and-rollout-validation).
+To roll back **one app**, use that app's known-good deployment and verify its
+IPA/fallback flow, model, and errors. Its retained direct-provider switch can
+also be used while that implementation and its credentials still exist. Follow
+the app's own runbook; leave the other app on its working deployment. Never
+revoke credentials that a retained rollback or another consumer still needs.
+TrendingNostr's spam detection may use an Ollama key independently of inference.
+
+For emergency shutdown, follow the
+[kill-switch instructions](production-controls.md#validation-and-incident-response).
 
 ## Operations, rotation, and extensions
 
@@ -201,20 +175,25 @@ for header capture/redaction too.
 Admission counts attempts, not successes. Images, reasoning, retries, and search
 can multiply cost per request. In-memory daily/concurrency controls reset across
 instances; there is no exact global daily or monetary cap. Configure account
-spending controls and a shutdown threshold using the production controls runbook.
+spending controls and a shutdown threshold if needed using the optional
+hardening guidance in the production controls runbook.
 
 Rotate a provider key in its owning app backend, redeploy that app, smoke-test,
 then revoke the old key once rollback no longer needs it. Rotate one app secret
-at a time: pause or return that app to its direct route, deploy the new shared
-secret and matching backend secret, verify authentication/generation, then resume.
+at a time: pause that app's hosted inference, deploy the new shared secret and
+matching backend secret, verify authentication/generation, then resume.
 Only one app secret is accepted at a time; plan for that transition. Rotating the
 automation bypass requires redeploying the shared service and updating private
 smoke callers; recheck POST admission on protected deployment URLs.
 
-To change the default provider/model, change the relevant app backend's selection,
+To change an app's provider/model, change the relevant backend's selection,
 verify discovery/model capabilities and the new app-owned key, deploy just that
 app, and run the matrix. No shared `DEFAULT_INFERENCE_PROVIDER` is supported.
 Onboard an app via the [application registry steps](../README.md#application-registry).
 Add a provider with the [adapter contract](../README.md#provider-adapters), register
 its capabilities/model overrides, add contract/error tests, explicitly allow it
 per app, and verify credential redaction and live feature behavior before rollout.
+
+Gemini search must remain gated in each app until the chosen model/key passes
+live search validation. Provider discovery metadata alone does not establish
+upstream feature availability.

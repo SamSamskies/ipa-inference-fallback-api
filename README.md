@@ -13,12 +13,12 @@ are never resolved from shared-service environment settings or another request.
 The registry stores app identity and allowed providers. Service policy owns
 provider limits, including an optional Replit completion cap.
 
-Production: `https://ipa-inference-fallback-api.vercel.app`. See the
-[deployment and integration runbook](docs/deployment.md) for environment ownership,
-port 3001 development, the smoke matrix, staged frontend migrations, and rollback.
-Inference is enabled with verified per-app admission limits. Neither frontend
-has been migrated; see the [deployment validation record](docs/deployment-validation.md)
-for tested features and remaining rollout checks.
+Production: `https://ipa-inference-fallback-api.vercel.app`. TrendingNostr and
+AdvancedNostrSearch use this API through authenticated backend proxies, with
+Replit selected. See the [deployment and integration runbook](docs/deployment.md)
+for configuration, local development, release checks, and rollback, and
+[production controls](docs/production-controls.md) for admission limits and
+optional hardening.
 
 ## Local development
 
@@ -231,20 +231,14 @@ allowance and Ollama limits/cooldowns remain in memory per process; Vercel
 instances do not share those counters. The Vercel admission check adds a separate
 per-app request budget across instances within a region. It counts admitted
 POSTs, including later failures, and is never refunded. Exact daily accounting
-and global budgets are explicitly outside the agreed first-pass scope of
-[issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6);
-reassess persistent shared accounting separately if those guarantees are needed.
+and global budgets require persistent shared state; assess that separately if
+those guarantees are needed.
 See [production controls](docs/production-controls.md) for WAF setup, provider
 spending safeguards, public-proxy controls, emergency shutdown, and rotation.
 
 There are no shared provider/model defaults or stored provider-key settings.
-Before rolling out, move provider credentials into the appropriate app backends
-and configure their authenticated proxies. Remove obsolete global and app-scoped
-`*_API_KEY`, `*_MODEL`, `DEFAULT_INFERENCE_PROVIDER`, and app-specific
-`*_REPLIT_MAX_TOKENS` settings from the shared deployment and local service
-configuration after migration.
-Existing stored secrets are not deleted by this source change. App secrets and
-the service-wide `REPLIT_MAX_TOKENS` remain shared-service settings.
+Provider credentials belong in the calling app's backend. App secrets and the
+service-wide `REPLIT_MAX_TOKENS` remain shared-service settings.
 
 The shared service handles provider keys transiently, so a running-service
 compromise could still capture keys in active requests. Application logs omit raw
@@ -285,11 +279,6 @@ Rotate provider keys in their owning backend; the next request uses the new key
 without a shared-service configuration change. Coordinate app-secret rotation
 between the shared service and app backend; the current registry accepts one
 secret per app. Browser bundles must never contain app secrets or provider keys.
-
-This implements the registry from [issue #4](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/4)
-and the authentication/routing portion of [issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5).
-Frontend migrations and removal of old credentials remain staged follow-up work;
-see the [rollout order and independent rollback](docs/deployment.md#staged-rollout-and-independent-rollback).
 
 ## Provider adapters
 
@@ -469,5 +458,6 @@ provider replies, provider/model/auth failures, and required provider/model
 selection, app authentication, request-local credential isolation, duplicate-header
 rejection, error redaction, app-scoped client quotas, Vercel admission failure
 handling and app isolation using a shared mock counter service, and the SDK's
-outbound headers/timeout. Published WAF rules and provider spending controls
-require separate rollout validation; live generation is a separate, credentialed check.
+outbound headers/timeout. Published WAF rules require deployment validation;
+optional provider spending controls are checked in their owning accounts. Live
+generation is a separate, credentialed check.
