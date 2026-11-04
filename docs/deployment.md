@@ -10,7 +10,9 @@ under `lib/` is packaged for functions without being served as static files.
 Inference is enabled with independently verified app buckets. The rule was
 published through the pinned Vercel CLI's staged configuration workflow, without
 a plan change or datastore. See the [validation record](deployment-validation.md)
-for tested features and remaining rollout checks. Neither frontend has been migrated.
+for tested features, completed migrations, and separate follow-ups. TrendingNostr
+and AdvancedNostrSearch now use shared Replit inference in production, as confirmed
+by the owner on November 4, 2026.
 
 ## Ownership and configuration
 
@@ -27,8 +29,8 @@ other browser-exposed prefix. `.env.local`, `.env`, and `.vercel` stay ignored;
 `.vercelignore` also excludes local environment files from CLI uploads.
 Do not put provider keys or the smoke caller key on the shared deployment.
 
-The app migrations can adopt these staged backend-only settings without changing
-the existing direct-provider route's environment variables:
+Both app proxies use these backend-only settings while retaining their independent
+direct-provider route's environment variables for rollback:
 
 | App-backend variable | Value / use |
 | --- | --- |
@@ -66,9 +68,10 @@ a separate terminal on a free port (for example TrendingNostr on 3000 and
 AdvancedNostrSearch on 3002). In each app's ignored backend environment, set
 `SHARED_INFERENCE_URL=http://127.0.0.1:3001/api/inference`, its matching local app
 secret, and that app's provider keys. The browser calls its own proxy; only the
-proxy calls port 3001. App migrations must implement this forwarding before
-these settings take effect. Local Vercel development skips the managed admission
-check, so validate that check on a deployment too.
+proxy calls port 3001. Both migrated apps implement this forwarding.
+AdvancedNostrSearch retains its Vite development middleware; run it with that
+app's `npm run dev`. Local development skips the managed admission check, so
+validate that check on a deployment too.
 Do not add a `dev` script that runs `vercel dev`: the pinned CLI detects that as
 a recursive development command and refuses to start.
 
@@ -152,9 +155,24 @@ Do not load-test a paid model to test the admission threshold.
 
 ## Staged rollout and independent rollback
 
+Both migrations below are complete: [TrendingNostr #110](https://github.com/SamSamskies/trendingnostr/issues/110)
+and [AdvancedNostrSearch #54](https://github.com/SamSamskies/advancednostrsearch/issues/54)
+are closed. The owner confirmed both apps use this API in production on November 4,
+2026. Their selected shared provider is Replit, with model
+`google/gemma-4-26b-a4b-it`. Both preserve IPA-first routing and hosted consent;
+absent reasoning uses provider defaults, with explicit caller options forwarded.
+
+The owner accepted development rate-limit testing for this rollout. Production
+public-proxy WAF/rate-limit testing and provider spending verification are separate
+hardening under [issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6),
+not migration completion prerequisites. They are not claimed as verified.
+Gemini search stays gated pending [issue #15](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/15).
+
+Retain the following staged procedure for future integrations and rollback:
+
 1. **Deploy and verify the shared API.** Record its production deployment and
-   source commit. Provision app credentials and verify public-proxy WAF controls
-   and provider spending safeguards before switching public traffic.
+   source commit. Provision app credentials and record the agreed scope and status
+   of public-proxy controls and provider spending safeguards.
 2. **Migrate TrendingNostr first** in its own PR/deployment. Keep IPA-first routing,
    prompts, consent, browser behavior, and its old direct-provider route/code
    available. Add a backend routing switch (for example
@@ -167,7 +185,8 @@ Do not load-test a paid model to test the admission threshold.
    provider usage/costs and admission failures. Keep both paths and credentials
    valid through the agreed observation period. Migrate AdvancedNostrSearch in
    its own PR with the same checks and its own rollback target.
-4. **Remove duplicated code and old keys last**, after both apps have passed
+4. **Remove duplicated code and old keys last** under
+   [issue #16](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/16), after both apps have passed
    their observation periods and rollback no longer depends on those keys.
    Inspect other consumers before revocation: TrendingNostr's spam detection
    may share its existing Ollama credential, and its `OLLAMA_MODEL` setting is

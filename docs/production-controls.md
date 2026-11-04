@@ -3,7 +3,17 @@
 For the production hostname, app integration, release commands, and independent
 frontend rollback, see [deployment and integration](deployment.md).
 Inference is enabled with live-verified per-app admission buckets; see
-[deployment validation](deployment-validation.md) for results and remaining rollout checks.
+[deployment validation](deployment-validation.md) for results and separate follow-ups.
+
+Both apps now use shared Replit inference in production. Under the owner's
+November 4, 2026 [rollout decision](https://github.com/SamSamskies/trendingnostr/issues/110),
+development rate-limit testing is accepted;
+production public-proxy WAF/rate-limit testing and provider spending verification
+are not migration or epic completion prerequisites. Those controls remain
+unverified follow-up work in
+[issue #6](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/6).
+The procedures below remain the hardening runbook; the rollout decision does not
+claim that the outstanding controls are configured or verified.
 
 This service uses Node serverless functions. Its Maps survive only as long as a
 particular process does. They cannot enforce daily quotas, concurrency, request
@@ -18,8 +28,9 @@ and the [Rate Limiting SDK](https://vercel.com/docs/vercel-firewall/vercel-waf/r
 
 ## Shared-service admission rule
 
-Configure this rule in the **shared fallback service's Vercel project**, before
-deploying this change:
+For a new deployment, configure this rule in the **shared fallback service's
+Vercel project** before enabling inference. The existing shared project already
+has the published, live-verified rule:
 
 1. Open **Firewall → Configure → New Rule**.
 2. Choose the **`@vercel/firewall`** condition and set the Rate Limit ID to
@@ -159,16 +170,17 @@ needed: separate keys alone can share the same account quota or balance.
 
 Request limits do not bound cost precisely: model prices, output tokens,
 reasoning, images, search, and retries vary. Verify real controls in provider
-consoles before enabling public traffic. If the account cannot impose a hard
-cap, document that remaining exposure and an explicit shutdown threshold.
+consoles as part of the spending-safeguard follow-up. If the account cannot impose
+a hard cap, document that remaining exposure and an explicit shutdown threshold.
 
 ## Operations and rollout validation
 
-1. Publish the shared admission rule and public-proxy rules before exposing
-   traffic. Record project, rule ID, threshold/window, region limitations, owner,
-   and provider account settings in the operator's private runbook; include no
+1. Publish the shared admission rule before enabling shared inference. Configure
+   and validate public-proxy rules under issue #6. Record project, rule ID,
+   threshold/window, region limitations, owner, and provider account settings
+   in the operator's private runbook; include no
    secrets here. The shared admission rule is published and live-verified; the
-   public-proxy rules and provider spending settings remain rollout work. See
+   public-proxy rules and provider spending settings remain separate hardening. See
    [deployment validation](deployment-validation.md) for the recorded status.
 2. In a controlled preview, temporarily choose a small threshold and use dummy
    app/provider credentials. Send enough valid POSTs to observe admission and

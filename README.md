@@ -16,9 +16,11 @@ provider limits, including an optional Replit completion cap.
 Production: `https://ipa-inference-fallback-api.vercel.app`. See the
 [deployment and integration runbook](docs/deployment.md) for environment ownership,
 port 3001 development, the smoke matrix, staged frontend migrations, and rollback.
-Inference is enabled with verified per-app admission limits. Neither frontend
-has been migrated; see the [deployment validation record](docs/deployment-validation.md)
-for tested features and remaining rollout checks.
+Inference is enabled with verified per-app admission limits. TrendingNostr and
+AdvancedNostrSearch both use this API in production through authenticated backend
+proxies, with Replit selected. See the
+[deployment validation record](docs/deployment-validation.md) for migration
+evidence, accepted rollout scope, and separate follow-ups.
 
 ## Local development
 
@@ -238,11 +240,12 @@ See [production controls](docs/production-controls.md) for WAF setup, provider
 spending safeguards, public-proxy controls, emergency shutdown, and rotation.
 
 There are no shared provider/model defaults or stored provider-key settings.
-Before rolling out, move provider credentials into the appropriate app backends
-and configure their authenticated proxies. Remove obsolete global and app-scoped
+Both migrated app backends own provider credentials and authenticate their proxies.
+For future apps, provision provider credentials in the calling backend.
+Remove obsolete global and app-scoped
 `*_API_KEY`, `*_MODEL`, `DEFAULT_INFERENCE_PROVIDER`, and app-specific
 `*_REPLIT_MAX_TOKENS` settings from the shared deployment and local service
-configuration after migration.
+configuration when no active consumer or retained rollback needs them.
 Existing stored secrets are not deleted by this source change. App secrets and
 the service-wide `REPLIT_MAX_TOKENS` remain shared-service settings.
 
@@ -288,7 +291,9 @@ secret per app. Browser bundles must never contain app secrets or provider keys.
 
 This implements the registry from [issue #4](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/4)
 and the authentication/routing portion of [issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5).
-Frontend migrations and removal of old credentials remain staged follow-up work;
+Both frontend migrations are complete. Retiring duplicate direct-provider code
+and unused credentials after observation is tracked in
+[issue #16](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/16);
 see the [rollout order and independent rollback](docs/deployment.md#staged-rollout-and-independent-rollback).
 
 ## Provider adapters
