@@ -1,5 +1,10 @@
 # First-pass production controls
 
+For the production hostname, app integration, release commands, and independent
+frontend rollback, see [deployment and integration](deployment.md).
+The production hostname is provisioned, but inference is currently disabled
+pending app-keyed WAF provisioning; see [deployment validation](deployment-validation.md).
+
 This service uses Node serverless functions. Its Maps survive only as long as a
 particular process does. They cannot enforce daily quotas, concurrency, request
 budgets, or cooldowns across Vercel instances or cold starts.
@@ -35,6 +40,21 @@ deploying this change:
 6. Set `INFERENCE_RATE_LIMIT_WINDOW_SECONDS=60`. If the dashboard window changes,
    update this setting too (10–600 seconds). It controls the conservative
    `Retry-After` advice; the **dashboard rule owns the window and request count**.
+
+For API-based provisioning, use the checked-in
+[`inference-app` rule](../config/inference-app-rule.json). Its rate-limit bucket
+keys must be **`["header:x-vercel-rate-limit-key"]`**, the SDK's derived key.
+An empty `keys` array creates a shared bucket across apps even though the handler
+supplies `rateLimitKey`. Vercel's
+[official Terraform test fixture](https://github.com/vercel/terraform-provider-vercel/blob/main/vercel/resource_firewall_config_test.go)
+uses this header for SDK rules. Preserve other rules when updating an existing
+project; the [PUT configuration API](https://vercel.com/docs/rest-api/security/put-firewall-configuration)
+replaces the configuration. Recheck app isolation after provisioning.
+The current account rejected nonempty counting keys with `402 payment_required`.
+The [plan table](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting#limits)
+also restricts arbitrary header dimensions. Resolve account support with Vercel
+or approve an alternative shared counter before rollout; the SDK's documented
+custom-key behavior alone does not establish that a published rule isolates apps.
 
 This consumes one WAF rate-limit rule in the project. Vercel currently allows
 one such rule on Hobby and 40 on Pro; both support fixed windows from 10 seconds

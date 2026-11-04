@@ -13,9 +13,15 @@ are never resolved from shared-service environment settings or another request.
 The registry stores app identity and allowed providers. Service policy owns
 provider limits, including an optional Replit completion cap.
 
+Production: `https://ipa-inference-fallback-api.vercel.app`. See the
+[deployment and integration runbook](docs/deployment.md) for environment ownership,
+port 3001 development, the smoke matrix, staged frontend migrations, and rollback.
+Inference is currently **disabled pending app-keyed rate-limit provisioning**;
+see the [deployment validation record](docs/deployment-validation.md).
+
 ## Local development
 
-Requires Node.js 22+ and npm. Vercel CLI is pinned as a development dependency.
+Requires Node.js 24 and npm. The deployment runtime and Vercel CLI are pinned.
 
 ```sh
 npm ci
@@ -27,6 +33,10 @@ npm run dev:vercel
 
 On first use, sign in with `npx vercel login` and link a development project.
 Use the **Other** framework preset with no frontend build or development command.
+The service listens on port **3001**; run each app's own proxy independently on
+another port. The
+[local proxy instructions](docs/deployment.md#local-development-with-independent-proxies)
+explain how to connect the two processes.
 Secrets belong in ignored local environment files or server-side environment
 settings. The shared service's local loader reads only its exact settings:
 `INFERENCE_FALLBACK_ENABLED`, `INFERENCE_CLIENT_DAILY_LIMIT`,
@@ -175,6 +185,13 @@ files unchanged, prints model/response/timing with credential echoes redacted, a
 exits nonzero on failures. Its timeout is the configured request budget plus
 30 seconds (150 seconds by default). Use `npm run smoke -- --help` for usage.
 
+Add `--checks` to test discovery, auth/validation failures, provider selection,
+and credential non-disclosure. Add `--vision` or `--web-search` in separate runs
+to check an inline image or a search-enabled response with a source URL. Protected
+deployment URLs accept a caller-side `VERCEL_AUTOMATION_BYPASS_SECRET`. See the
+[deployment smoke matrix](docs/deployment.md#deployment-smoke-matrix) for details
+and the limits of these checks.
+
 ## Shared service configuration
 
 | Variable | Default / behavior |
@@ -263,8 +280,8 @@ secret per app. Browser bundles must never contain app secrets or provider keys.
 
 This implements the registry from [issue #4](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/4)
 and the authentication/routing portion of [issue #5](https://github.com/SamSamskies/ipa-inference-fallback-api/issues/5).
-Frontend migrations remain separate work; no deployment
-or stored-secret cleanup is performed by these source changes.
+Frontend migrations and removal of old credentials remain staged follow-up work;
+see the [rollout order and independent rollback](docs/deployment.md#staged-rollout-and-independent-rollback).
 
 ## Provider adapters
 

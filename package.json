@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   },
   "scripts": {
-    "dev:vercel": "vercel dev",
+    "dev:vercel": "vercel dev --listen 3001",
+    "deploy:preview": "vercel deploy",
+    "deploy:production": "vercel deploy --prod",
     "generate:app-secret": "node scripts/generate-app-secret.mjs",
     "smoke": "node scripts/smoke.mjs",
     "test": "node --test tests/*.test.mjs"
