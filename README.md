@@ -164,10 +164,12 @@ are not added to the browser CORS allowlist.
 ## Smoke testing
 
 The smoke CLI acts as a caller backend. Set the selected app's registered
-`*_APP_SECRET` and `INFERENCE_SMOKE_PROVIDER_KEY` in its local environment (or
-ignored local `.env.local`). The provider key is read only by the CLI, not the
-shared handler. Never configure `INFERENCE_SMOKE_PROVIDER_KEY` on the shared Vercel
-deployment. Credentials are not accepted as CLI arguments.
+`*_APP_SECRET` in its local environment or ignored `.env.local`. The CLI always
+prompts for the selected provider's API key with hidden input in an interactive
+terminal. Type or paste the key and press Enter; Ctrl+C cancels. It is sent only
+in the provider-key HTTP header, without being saved to configuration, echoed,
+or included in command arguments. No provider-key flag or environment variable
+is needed; the old `INFERENCE_SMOKE_PROVIDER_KEY` setting is ignored.
 
 ```sh
 npm run smoke -- --app trendingnostr --provider ollama --model gemma4:cloud
@@ -175,8 +177,8 @@ npm run smoke -- --app trendingnostr --provider gemini --model gemma-4-31b-it
 npm run smoke -- --app advancednostrsearch --provider replit --model google/gemma-4-26b-a4b-it
 ```
 
-All three flags are required. Set `INFERENCE_SMOKE_PROVIDER_KEY` for the provider
-you are testing. The CLI starts a temporary local server around the actual handler,
+All three flags are required. Enter the matching provider key when prompted.
+The CLI starts a temporary local server around the actual handler,
 probes configuration, and sends a short generation request with search disabled
 and reasoning effort `none`. No Vercel login or running dev server is needed.
 This makes a real provider API call and may consume quota or incur a small charge.

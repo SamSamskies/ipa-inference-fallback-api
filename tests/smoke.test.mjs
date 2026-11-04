@@ -13,11 +13,11 @@ function readJsonLines(path) {
   catch (error) { if (error.code === "ENOENT") return []; throw error; }
 }
 
-function run(args, scenario = "success", requestTimeout = "", app = "trendingnostr") {
+function run(args, scenario = "success", requestTimeout = "", app = "trendingnostr", input = "private-smoke-provider-key\n") {
   if (app) args = ["--app", app, ...args];
   const directory = mkdtempSync(join(tmpdir(), "ipa-smoke-test-"));
   try {
-    const envContents = `DEFAULT_INFERENCE_PROVIDER=replit\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\nTRENDINGNOSTR_APP_SECRET=${scenario === "missing_app_secret" ? "" : "private-smoke-app-secret"}\nINFERENCE_SMOKE_PROVIDER_KEY=${scenario === "missing_caller_key" ? "" : "private-smoke-provider-key"}\n`;
+    const envContents = `DEFAULT_INFERENCE_PROVIDER=replit\nGEMINI_API_KEY=private-gemini-test-key\nOLLAMA_API_KEY=private-ollama-test-key\nGEMINI_MODEL=configured-gemini-model\nOLLAMA_MODEL=configured-ollama-model\nREPLIT_API_KEY=private-replit-test-key\nREPLIT_MODEL=configured-replit-model\nINFERENCE_REQUEST_TIMEOUT_MS=${requestTimeout}\nTRENDINGNOSTR_APP_SECRET=${scenario === "missing_app_secret" ? "" : "private-smoke-app-secret"}\nINFERENCE_SMOKE_PROVIDER_KEY=private-smoke-ignored-env-key\n`;
     writeFileSync(join(directory, ".env.local"), envContents);
     const mockPath = join(directory, "mock.mjs");
     writeFileSync(mockPath, `
@@ -25,6 +25,11 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
       import { appendFileSync } from "node:fs";
       import http from "node:http";
       import { syncBuiltinESMExports } from "node:module";
+      if (process.env.IPA_SMOKE_SCENARIO !== "noninteractive") {
+        Object.defineProperty(process.stdin, "isTTY", { value: true });
+        Object.defineProperty(process.stderr, "isTTY", { value: true });
+        process.stdin.setRawMode = (enabled) => { process.stdin.isRaw = enabled; };
+      }
       const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
       AbortSignal.timeout = (ms) => {
         appendFileSync("timeouts.jsonl", JSON.stringify(ms) + "\\n");
@@ -117,6 +122,7 @@ function run(args, scenario = "success", requestTimeout = "", app = "trendingnos
       cwd: directory, env: { ...env, DEFAULT_INFERENCE_PROVIDER: "replit", IPA_SMOKE_SCENARIO: scenario,
         ...(scenario === "protected" ? { VERCEL_AUTOMATION_BYPASS_SECRET: "private-smoke-bypass-secret" } : {}),
       }, encoding: "utf8", timeout: 10_000,
+      input: scenario === "empty_prompt" ? "\n" : scenario === "cancel_prompt" ? "\x03" : scenario === "closed_prompt" ? "" : input,
     });
     assert.ifError(result.error);
     assert.equal(readFileSync(join(directory, ".env.local"), "utf8"), envContents);
@@ -287,7 +293,7 @@ test("smoke timeout errors report the configured duration", () => {
   assert.deepEqual(result.timeouts,[31_000]);
 });
 
-test("smoke requires a registered app and caller credentials with no provider-env fallback", () => {
+test("smoke requires a registered app, app secret, and a valid prompted key without env fallback", () => {
   const args = ["--provider", "replit", "--model", "backend/model"];
   for (const app of [null, "unknown"]) {
     const result = run(args, "success", "", app);
@@ -296,11 +302,27 @@ test("smoke requires a registered app and caller credentials with no provider-en
     assert.equal(result.requests.length, 0);
   }
   for (const [scenario, expected] of [["missing_app_secret", /TRENDINGNOSTR_APP_SECRET/],
-    ["missing_caller_key", /INFERENCE_SMOKE_PROVIDER_KEY/]]) {
+    ["empty_prompt", /Enter a valid provider API key/],
+    ["cancel_prompt", /Provider key entry cancelled/],
+    ["closed_prompt", /Provider key entry cancelled/],
+    ["noninteractive", /interactive terminal/]]) {
     const result = run(args, scenario);
     assert.equal(result.status, 1, result.output);
     assert.match(result.output, expected);
     assert.equal(result.requests.length, 0);
+  }
+});
+
+test("smoke always prompts and rejects malformed key input before making requests", () => {
+  const args = ["--provider", "replit", "--model", "backend/model"];
+  const result = run(args);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /Provider API key \(hidden\):/);
+  for (const input of ["key with spaces\n", "key,with,commas\n", `${"x".repeat(8193)}\n`]) {
+    const invalid = run(args, "success", "", "trendingnostr", input);
+    assert.equal(invalid.status, 1, invalid.output);
+    assert.match(invalid.output, /Enter a valid provider API key/);
+    assert.equal(invalid.requests.length, 0);
   }
 });
 

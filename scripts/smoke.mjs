@@ -5,18 +5,19 @@ import handler from "../api/inference.js";
 import providersHandler from "../api/providers.js";
 import { apps, getApp } from "../lib/apps.js";
 import { providers } from "../lib/providers/registry.js";
-import { loadLocalEnvFallback } from "../lib/env.js";
 import { INFERENCE_APP_HEADER, INFERENCE_PROVIDER_KEY_HEADER } from "../lib/http.js";
 import { requestProviderKey } from "../lib/app-auth.js";
 import { smokeTimeoutMs } from "../lib/timeouts.js";
 import { normalizeModel } from "../lib/inference-request.js";
+import { promptProviderKey } from "./prompt-provider-key.mjs";
 
 const HELP = `Usage: npm run smoke -- --app ${Object.keys(apps).join("|")} --provider ${Object.keys(providers).join("|")} --model MODEL [--url ENDPOINT] [--checks] [--vision | --web-search]
 
 By default, start a temporary local server.
 --app selects the app secret from its registered *_APP_SECRET environment setting.
-Set INFERENCE_SMOKE_PROVIDER_KEY in the caller environment or local .env.local.
-App and provider credentials are sent only in headers; never as CLI arguments.
+The provider API key is always prompted for with hidden input in an interactive terminal.
+No provider-key environment variable or flag is needed. Ctrl+C cancels entry.
+App and provider credentials are sent only in HTTP headers.
 --provider is required and is sent in the query parameter.
 --model is required and is sent in the inference request body.
 Use --url to test an HTTPS endpoint (HTTP is allowed only for loopback development).
@@ -144,18 +145,50 @@ async function main() {
   const appId = values.app;
   const app = getApp(appId);
   if (!app?.enabled) throw publicError(`--app is required: choose ${Object.keys(apps).join(", ")}.`);
-  loadLocalEnvFallback(["INFERENCE_SMOKE_PROVIDER_KEY"], { exact: true });
   const appSecret = process.env[app.authSecretEnv]?.trim();
   if (!appSecret || appSecret.length > 4000 || !/^[\x21-\x7e]+$/.test(appSecret) || appSecret.includes(",")) {
     throw publicError(`Set a valid ${app.authSecretEnv} in the caller environment.`);
   }
+  let model;
+  try {
+    model = normalizeModel(values.model);
+  } catch {
+    throw publicError("--model is required: use a model ID of 1–200 characters without whitespace or control characters.");
+  }
+  let url;
+  if (values.url !== undefined) {
+    try {
+      url = new URL(values.url);
+    } catch {
+      throw publicError("--url must be an absolute HTTP(S) endpoint URL.");
+    }
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+      throw publicError("--url must be an HTTP(S) endpoint URL without embedded credentials.");
+    }
+    if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+      throw publicError("--url must use HTTPS outside loopback development.");
+    }
+  }
+
+  let enteredKey;
+  try {
+    enteredKey = await promptProviderKey();
+  } catch (error) {
+    if (error?.code === "prompt_requires_tty") {
+      throw publicError("Run the smoke command in an interactive terminal to enter the provider API key.");
+    }
+    if (error?.code === "prompt_cancelled" || error?.code === "prompt_closed") {
+      throw publicError("Provider key entry cancelled.");
+    }
+    throw publicError("Could not read the provider API key.");
+  }
   let providerKey;
   try {
     providerKey = requestProviderKey({ headers: {
-      [INFERENCE_PROVIDER_KEY_HEADER.toLowerCase()]: process.env.INFERENCE_SMOKE_PROVIDER_KEY,
+      [INFERENCE_PROVIDER_KEY_HEADER.toLowerCase()]: enteredKey,
     } });
   } catch {
-    throw publicError("Set a valid INFERENCE_SMOKE_PROVIDER_KEY in the caller environment.");
+    throw publicError("Enter a valid provider API key (1–8192 visible ASCII characters without whitespace or commas).");
   }
   const credentialHeaders = {
     [INFERENCE_APP_HEADER]: appId,
@@ -170,29 +203,9 @@ async function main() {
       throw publicError("Response exposed a credential; details suppressed.");
     }
   };
-  let model;
-  try {
-    model = normalizeModel(values.model);
-  } catch {
-    throw publicError("--model is required: use a model ID of 1–200 characters without whitespace or control characters.");
-  }
-
   let server;
   try {
-    let url;
-    if (values.url !== undefined) {
-      try {
-        url = new URL(values.url);
-      } catch {
-        throw publicError("--url must be an absolute HTTP(S) endpoint URL.");
-      }
-      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
-        throw publicError("--url must be an HTTP(S) endpoint URL without embedded credentials.");
-      }
-      if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
-        throw publicError("--url must use HTTPS outside loopback development.");
-      }
-    } else {
+    if (!url) {
       server = await startLocalServer();
       url = new URL(`http://127.0.0.1:${server.address().port}/api/inference`);
     }

@@ -28,7 +28,8 @@
 
 | Check | Result |
 | --- | --- |
-| Full test suite using the explicit Node 24.12.0 binary | 179 passed |
+| Full test suite using the explicit Node 24.12.0 binary | 183 passed |
+| Hidden provider-key prompt | Terminal entry produced no key echo; editing, cancellation, EOF, input validation, and terminal-mode restoration passed |
 | `vercel dev --listen 3001` | Authenticated discovery and configuration probe passed |
 | Stable production alias without automation bypass | App-authenticated probe succeeded before disable; unauthenticated discovery returned JSON 401 |
 | Both apps × Ollama/Gemini | GET probe, discovery, negative checks, and real POST generation passed with separate app/provider credentials |

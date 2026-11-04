@@ -119,10 +119,12 @@ secrets and never restore a revoked secret accidentally.
 
 ## Deployment smoke matrix
 
-The CLI reads the chosen app's `*_APP_SECRET` and `INFERENCE_SMOKE_PROVIDER_KEY`
-from the caller environment or ignored `.env.local`. Set the latter to that
-app/provider's key before each command. For protected deployment URLs also set
-`VERCEL_AUTOMATION_BYPASS_SECRET` in the caller environment. Credentials are
+The CLI reads the chosen app's `*_APP_SECRET` from the caller environment or
+ignored `.env.local`. Every run prompts for that app/provider's key with hidden
+input; enter or paste the key and press Enter. Ctrl+C cancels. The smoke command
+requires an interactive terminal and does not read provider keys from flags,
+environment variables, or piped input. For protected deployment URLs also set
+`VERCEL_AUTOMATION_BYPASS_SECRET` in the caller environment. Credentials are HTTP
 headers, never CLI arguments. These tests make real provider calls and use quota.
 
 ```sh
